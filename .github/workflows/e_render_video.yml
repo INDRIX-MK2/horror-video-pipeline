@@ -1,4 +1,4 @@
-﻿name: Render final 9:16
+﻿name: e_render_video
 
 on:
   workflow_call:
@@ -6,150 +6,80 @@ on:
       target_res:
         required: true
         type: string
-        default: "720x1280"
       fps:
         required: true
         type: number
-        default: 30
       min_duration_sec:
         required: true
         type: number
-        default: 65
       max_duration_sec:
         required: true
         type: number
-        default: 180
+      captions_path:
+        required: true
+        type: string
+      voice_path:
+        required: true
+        type: string
       mute_stock_clips:
-        required: false
+        required: true
         type: boolean
-        default: true
       subtitles_fontsize:
-        required: false
+        required: true
         type: number
-        default: 28
       subtitles_margin_v:
-        required: false
+        required: true
         type: number
-        default: 80
+    outputs:
+      video_path:
+        description: "Chemin de la vidéo finale"
+        value: ${{ jobs.render.outputs.video_path }}
+
+permissions:
+  contents: read
 
 jobs:
   render:
     runs-on: ubuntu-latest
+    outputs:
+      video_path: ${{ steps.meta.outputs.video_path }}
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: story-output
-
-      - name: Download media-bank
-        uses: actions/download-artifact@v4
+          name: images_zip
+          path: .
+      - uses: actions/download-artifact@v4
         with:
-          name: media-bank
-          path: media
-
-      - name: Download fetched set (if any)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
+          name: voice_mp3
+          path: .
+      - uses: actions/download-artifact@v4
         with:
-          name: fetched-media
-          path: fetched
-
-      - name: Download voiceover
-        uses: actions/download-artifact@v4
-        with:
-          name: voiceover
-
-      - name: Download subtitles
-        uses: actions/download-artifact@v4
-        with:
-          name: subtitles
-
-      - name: Prepare visuals (images→clips, videos muets, scale/pad)
-        shell: bash
+          name: subtitles_srt
+          path: .
+      - name: Installer FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg unzip
+      - name: Préparer
         run: |
-          set -Eeuo pipefail
-          mkdir -p work clips
-          RES="${{ inputs.target_res }}"
-          FPS="${{ inputs.fps }}"
-
-          # Liste de sources potentielles
-          find media -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' \) > sources.txt || true
-          find fetched -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.mp4' \) >> sources.txt || true
-
-          # Si aucune source -> écran noir fallback (évite échec)
-          if [ ! -s sources.txt ]; then
-            echo "Aucune source visuelle, création d'un fond noir…" >&2
-            ffmpeg -y -f lavfi -i color=c=black:s="${RES}":r="${FPS}" -t 10 clips/0000.mp4
-          fi
-
-          # Durée de la voix (borne 65..180)
-          VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 voice.mp3)
-          MIN=${{ inputs.min_duration_sec }}
-          MAX={{ inputs.max_duration_sec }}
-          # On n'écrête pas la voix; on fera -shortest sur le mux final.
-          TARGET_DUR="$VO_DUR"
-          awk -v d="$TARGET_DUR" -v m="$MIN" 'BEGIN{ if (d<m) print "WARN: voice under min"; }'
-          awk -v d="$TARGET_DUR" -v M="$MAX" 'BEGIN{ if (d>M) print "WARN: voice over max"; }'
-
-          # Convertir chaque source en clip vertical 9:16 muet
-          # Images -> 3.0s; Vidéos -> on garde la vidéo mais on force muet si demandé
-          idx=0
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            b=$(printf "clips/%04d.mp4" "$idx")
-            if file -bi "$f" | grep -qiE 'image/'; then
-              ffmpeg -y -loop 1 -i "$f" -f lavfi -i anullsrc \
-                -t 3.0 -r "$FPS" \
-                -vf "scale='min(ih*9/16\,iw)':'min(iw*16/9\,ih)',crop=ih*9/16:ih,scale=${RES},setsar=1" \
-                -c:v libx264 -pix_fmt yuv420p -shortest "$b"
-            else
-              if ${{ inputs.mute_stock_clips }}; then
-                AOPT="-an"
-              else
-                AOPT=""
-              fi
-              ffmpeg -y -i "$f" $AOPT -r "$FPS" \
-                -vf "scale='min(ih*9/16\,iw)':'min(iw*16/9\,ih)',crop=ih*9/16:ih,scale=${RES},setsar=1" \
-                -c:v libx264 -pix_fmt yuv420p "$b"
-            fi
-            idx=$((idx+1))
-          done < sources.txt
-
-          # Si trop peu de clips pour couvrir la voix, on boucle
-          tot=0
-          for c in clips/*.mp4; do
-            d=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$c"); tot=$(awk -v a="$tot" -v b="$d" 'BEGIN{print a+b}')
-          done
-          while awk -v t="$tot" -v v="$VO_DUR" 'BEGIN{exit !(t<v)}'; do
-            for c in clips/*.mp4; do
-              nn=$(printf "clips/%04d.mp4" "$idx"); cp "$c" "$nn"; idx=$((idx+1))
-              d=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$nn"); tot=$(awk -v a="$tot" -v b="$d" 'BEGIN{print a+b}')
-              awk -v t="$tot" -v v="$VO_DUR" 'BEGIN{if(t>=v) exit 1; else exit 0}' || break
-            done
-          done
-
-          # Concat
-          ls clips/*.mp4 | sed "s/.*/file '&'/" > list.txt
-          ffmpeg -y -f concat -safe 0 -i list.txt -c copy video_novoice.mp4
-
-      - name: Add voice + burn subtitles (taille plus petite)
-        shell: bash
+          mkdir -p outputs work
+          unzip -o outputs/images.zip -d work
+      - name: Composer vidéo (placeholder robuste)
+        env:
+          RES:  ${{ inputs.target_res }}
+          FPS:  ${{ inputs.fps }}
+          MIN:  ${{ inputs.min_duration_sec }}
+          MAX:  ${{ inputs.max_duration_sec }}
+          FS:   ${{ inputs.subtitles_fontsize }}
+          MV:   ${{ inputs.subtitles_margin_v }}
         run: |
-          set -Eeuo pipefail
-          RES="${{ inputs.target_res }}"
-          FS=${{ inputs.subtitles_fontsize }}
-          MV=${{ inputs.subtitles_margin_v }}
-
-          # Merge voix (vidéo muette + audio voix)
-          ffmpeg -y -i video_novoice.mp4 -i voice.mp3 -c:v copy -c:a aac -shortest merged.mp4
-
-          # Brûler SRT (ASS style via force_style)
-          # Alignment=2 (bas centré), MarginV contrôlé, FontSize paramétrable
-          ffmpeg -y -i merged.mp4 -vf "subtitles=subs.srt:force_style='FontName=Arial,FontSize=${FS},PrimaryColour=&H00FFFFFF,OutlineColour=&H00303030,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=${MV}'" -c:a copy final.mp4
-
-      - name: Upload final video
-        uses: actions/upload-artifact@v4
+          ffmpeg -f lavfi -i color=c=black:s=${RES}:d=${MAX} -r ${FPS} -c:v libx264 -pix_fmt yuv420p work/base.mp4 -y
+          ffmpeg -i work/base.mp4 -i outputs/voice.mp3 -shortest -c:v copy -c:a aac work/with_audio.mp4 -y
+          ffmpeg -i work/with_audio.mp4 -vf "subtitles=outputs/subtitles.srt:force_style='Fontname=DejaVu Sans,Fontsize=${FS},Outline=2,Shadow=1,Alignment=5,MarginV=${MV}'" -c:a copy outputs/final.mp4 -y
+      - uses: actions/upload-artifact@v4
         with:
-          name: final-video
-          path: final.mp4
+          name: final_video_mp4
+          path: outputs/final.mp4
+          if-no-files-found: error
           retention-days: 7
+      - id: meta
+        run: echo "video_path=outputs/final.mp4" >> "$GITHUB_OUTPUT"

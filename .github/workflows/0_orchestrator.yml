@@ -1,86 +1,153 @@
-﻿name: Video pipeline (one-click)
+﻿name: Orchestrator
 
 on:
   workflow_dispatch:
     inputs:
-      topic:
-        description: "Sujet de la vidéo"
-        type: string
-        required: true
       locale:
-        description: "Locale (ex: fr-FR)"
-        type: string
+        description: "Langue"
         required: true
-        default: fr-FR
-      media_query:
-        description: "Mots-clés banque médias (horreur, peur, angoisse, etc.)"
+        default: "fr-FR"
+        type: choice
+        options: [fr-FR, en-US]
+
+      topic:
+        description: "Sujet / Thème de l'histoire"
+        required: true
+        default: "légende urbaine"
         type: string
-        required: false
-        default: "horreur, peur, angoisse, frisson, cauchemar"
+
+      query:
+        description: "Requête d'images"
+        required: true
+        default: "urban legend night street"
+        type: string
+
+      target_res:
+        description: "Résolution de sortie"
+        required: true
+        default: "720x1280"
+        type: choice
+        options: ["720x1280", "1080x1920"]
+
+      fps:
+        description: "Images par seconde"
+        required: true
+        default: 30
+        type: number
+
+      min_duration_sec:
+        description: "Durée minimale (s)"
+        required: true
+        default: 65
+        type: number
+
+      max_duration_sec:
+        description: "Durée maximale (s)"
+        required: true
+        default: 75
+        type: number
+
+      mute_stock_clips:
+        description: "Couper l'audio des clips stock"
+        required: true
+        default: true
+        type: boolean
+
+      subtitles_fontsize:
+        description: "Taille police sous-titres"
+        required: true
+        default: 60
+        type: number
+
+      subtitles_margin_v:
+        description: "Marge verticale sous-titres"
+        required: true
+        default: 220
+        type: number
+
+      voice_id:
+        description: "ID de voix TTS"
+        required: true
+        default: "fr-FR-Standard-A"
+        type: string
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
-  group: video-${{ github.ref }}
-  cancel-in-progress: true
+  group: orchestrator-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  media-bank:
-    uses: ./.github/workflows/g_build_media_bank.yml
-    with:
-      query: ${{ inputs.media_query }}
-      max_items: 40
-    secrets: inherit
-
-  gen-prompt:
+  a_prompt:
+    name: Générer le prompt
     uses: ./.github/workflows/a_prompt.yml
-    with:
-      topic: ${{ inputs.topic }}
-      locale: ${{ inputs.locale }}
     secrets: inherit
+    with:
+      locale: ${{ github.event.inputs.locale }}
+      topic:  ${{ github.event.inputs.topic }}
 
-  voiceover:
-    needs: gen-prompt
+  b_voiceover:
+    name: Générer la voix off
+    needs: a_prompt
     uses: ./.github/workflows/b_voiceover.yml
-    with:
-      locale: ${{ inputs.locale }}
     secrets: inherit
+    with:
+      voice_id:   ${{ github.event.inputs.voice_id }}
+      script_path: ${{ needs.a_prompt.outputs.script_path }}
 
-  # Pas de job "images" ici pour éviter les erreurs d'inputs manquants.
-  # Le rendu pioche directement dans 'media-bank' (+ éventuels médias déjà fetchés).
+  c_fetch_images:
+    name: Récupérer les images
+    needs: a_prompt
+    uses: ./.github/workflows/c_fetch_images.yml
+    secrets: inherit
+    with:
+      query:      ${{ github.event.inputs.query }}
+      target_res: ${{ github.event.inputs.target_res }}
 
-  subtitles:
-    needs:
-      - gen-prompt
-      - voiceover
+  d_generate_subtitles:
+    name: Générer les sous-titres
+    needs: a_prompt
     uses: ./.github/workflows/d_generate_subtitles.yml
-    with:
-      min_lines: 18
-      max_lines: 24
     secrets: inherit
+    with:
+      script_path:          ${{ needs.a_prompt.outputs.script_path }}
+      subtitles_fontsize:   ${{ github.event.inputs.subtitles_fontsize }}
+      subtitles_margin_v:   ${{ github.event.inputs.subtitles_margin_v }}
 
-  render:
-    needs:
-      - media-bank
-      - subtitles
-      - voiceover
-      - gen-prompt
+  e_render_video:
+    name: Composer la vidéo
+    needs: [c_fetch_images, d_generate_subtitles, b_voiceover]
     uses: ./.github/workflows/e_render_video.yml
-    with:
-      target_res: "720x1280"
-      fps: 30
-      min_duration_sec: 65
-      max_duration_sec: 180
-      mute_stock_clips: true
-      subtitles_fontsize: 28
-      subtitles_margin_v: 80
     secrets: inherit
+    with:
+      target_res:         ${{ github.event.inputs.target_res }}
+      fps:                ${{ github.event.inputs.fps }}
+      min_duration_sec:   ${{ github.event.inputs.min_duration_sec }}
+      max_duration_sec:   ${{ github.event.inputs.max_duration_sec }}
+      captions_path:      ${{ needs.d_generate_subtitles.outputs.captions_path }}
+      voice_path:         ${{ needs.b_voiceover.outputs.voice_path }}
+      mute_stock_clips:   ${{ github.event.inputs.mute_stock_clips }}
+      subtitles_fontsize: ${{ github.event.inputs.subtitles_fontsize }}
+      subtitles_margin_v: ${{ github.event.inputs.subtitles_margin_v }}
 
-  # Garde ce job uniquement si tu as bien ce workflow :
-  # .github/workflows/f_publish_discord.yml
-  # Sinon, supprime ce bloc.
-  publish:
-    needs: render
+  f_publish_discord:
+    name: Publier sur Discord
+    needs: e_render_video
     uses: ./.github/workflows/f_publish_discord.yml
     secrets: inherit
+    with:
+      locale:    ${{ github.event.inputs.locale }}
+      video_path: ${{ needs.e_render_video.outputs.video_path }}
+
+  g_build_media_bank:
+    name: Archiver la production
+    needs: [e_render_video, d_generate_subtitles, b_voiceover]
+    uses: ./.github/workflows/g_build_media_bank.yml
+    secrets: inherit
+    with:
+      query:         ${{ github.event.inputs.query }}
+      video_path:    ${{ needs.e_render_video.outputs.video_path }}
+      captions_path: ${{ needs.d_generate_subtitles.outputs.captions_path }}
+      voice_path:    ${{ needs.b_voiceover.outputs.voice_path }}

@@ -1,128 +1,49 @@
-﻿name: Voiceover (reusable)
+﻿name: b_voiceover
 
 on:
   workflow_call:
     inputs:
-      artifact_name:
-        description: "Nom de l'artifact contenant le script"
-        required: false
-        type: string
-        default: story-output
-      script_filename:
-        description: "Nom du fichier script à lire dans l'artifact"
-        required: false
-        type: string
-        default: script.txt
-      model_id:
-        description: "Modèle ElevenLabs (ex: eleven_multilingual_v2)"
-        required: false
-        type: string
-        default: eleven_multilingual_v2
-      audio_format:
-        description: "Format audio de sortie (mp3 ou wav)"
-        required: false
-        type: string
-        default: mp3
-      normalize_audio:
-        description: "Normaliser l'audio (ffmpeg loudnorm)"
-        required: false
-        type: boolean
-        default: true
-      output_basename:
-        description: "Nom de base du fichier de sortie (sans extension)"
-        required: false
-        type: string
-        default: voice
-    secrets:
-      ELEVEN_API_KEY:
+      voice_id:
         required: true
-      ELEVEN_VOICE_ID:
+        type: string
+      script_path:
         required: true
+        type: string
+    outputs:
+      voice_path:
+        description: "Chemin du MP3 généré"
+        value: ${{ jobs.tts.outputs.voice_path }}
+
+permissions:
+  contents: read
 
 jobs:
-  vo:
-    name: vo
+  tts:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+    outputs:
+      voice_path: ${{ steps.meta.outputs.voice_path }}
     steps:
-      - name: Préparer répertoires
-        run: |
-          set -euo pipefail
-          mkdir -p story vo
+      - uses: actions/checkout@v4
 
-      - name: Télécharger le script
+      - name: Télécharger le prompt
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.artifact_name }}
-          path: story
+          name: prompt_txt
+          path: .
 
-      - name: Vérifier les fichiers récupérés
+      - name: Simuler TTS (placeholder)
         run: |
-          set -euo pipefail
-          ls -la story
-          test -f "story/${{ inputs.script_filename }}" || { echo "Fichier introuvable: story/${{ inputs.script_filename }}"; exit 1; }
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          mkdir -p outputs
+          ffmpeg -f lavfi -i anullsrc=cl=stereo:r=44100 -t 3 -q:a 3 outputs/voice.mp3 -y
 
-      - name: Installer dépendances (ffmpeg, jq)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
-
-      - name: Appeler ElevenLabs (TTS)
-        env:
-          ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
-          ELEVEN_VOICE_ID: ${{ secrets.ELEVEN_VOICE_ID }}
-          MODEL_ID: ${{ inputs.model_id }}
-          AUDIO_FMT: ${{ inputs.audio_format }}
-        run: |
-          set -euo pipefail
-          # Échappe le script en JSON pour l'envoyer proprement à l'API
-          text_json=$(jq -Rs . < "story/${{ inputs.script_filename }}")
-
-          # Détermine l'en-tête Accept (mp3 = audio/mpeg, wav = audio/wav)
-          accept_header="audio/mpeg"
-          if [ "${AUDIO_FMT}" = "wav" ]; then
-            accept_header="audio/wav"
-          fi
-
-          out="vo/raw_tts.${AUDIO_FMT}"
-          curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}" \
-            -H "xi-api-key: ${ELEVEN_API_KEY}" \
-            -H "accept: ${accept_header}" \
-            -H "content-type: application/json" \
-            -d "{\"text\": ${text_json}, \"model_id\": \"${MODEL_ID}\"}" \
-            --output "${out}"
-
-          if [ ! -s "${out}" ]; then
-            echo "Échec TTS: sortie vide."
-            exit 1
-          fi
-
-      - name: Normaliser l'audio (ffmpeg loudnorm)
-        if: ${{ inputs.normalize_audio }}
-        env:
-          AUDIO_FMT: ${{ inputs.audio_format }}
-          OUT_BASENAME: ${{ inputs.output_basename }}
-        run: |
-          set -euo pipefail
-          in="vo/raw_tts.${AUDIO_FMT}"
-          out="vo/${OUT_BASENAME}.${AUDIO_FMT}"
-          ffmpeg -y -loglevel error -i "$in" -af loudnorm=I=-16:TP=-1.5:LRA=11 "$out"
-          ls -lh "$out"
-
-      - name: Renommer sans normalisation
-        if: ${{ inputs.normalize_audio == false }}
-        env:
-          AUDIO_FMT: ${{ inputs.audio_format }}
-          OUT_BASENAME: ${{ inputs.output_basename }}
-        run: |
-          set -euo pipefail
-          mv "vo/raw_tts.${AUDIO_FMT}" "vo/${OUT_BASENAME}.${AUDIO_FMT}"
-
-      - name: Upload VO
+      - name: Publier la voix
         uses: actions/upload-artifact@v4
         with:
-          name: vo
-          path: |
-            vo/*
+          name: voice_mp3
+          path: outputs/voice.mp3
+          if-no-files-found: error
+          retention-days: 7
+
+      - id: meta
+        run: echo "voice_path=outputs/voice.mp3" >> "$GITHUB_OUTPUT"

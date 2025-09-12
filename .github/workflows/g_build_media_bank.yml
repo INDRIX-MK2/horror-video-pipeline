@@ -1,4 +1,4 @@
-name: Build Media Bank (Pixabay + Pexels)
+name: g_build_media_bank
 
 on:
   workflow_call:
@@ -6,66 +6,47 @@ on:
       query:
         required: true
         type: string
-      max_items:
-        required: false
-        type: number
-        default: 40
+      video_path:
+        required: true
+        type: string
+      captions_path:
+        required: true
+        type: string
+      voice_path:
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  bank:
+  archive:
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare dirs
-        shell: bash
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: images_zip, path: . }
+      - uses: actions/download-artifact@v4
+        with: { name: final_video_mp4, path: . }
+      - uses: actions/download-artifact@v4
+        with: { name: subtitles_srt, path: . }
+      - uses: actions/download-artifact@v4
+        with: { name: voice_mp3, path: . }
+      - uses: actions/download-artifact@v4
+        with: { name: prompt_txt, path: . }
+      - name: Packager bundle
         run: |
-          set -Eeuo pipefail
-          mkdir -p bank/img bank/vid
-
-      - name: Fetch from Pixabay (photos + tiny videos)
-        env:
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          Q="${{ inputs.query }}"
-          MI=${{ inputs.max_items }}
-          [ -n "${PIXABAY_API_KEY:-}" ] || { echo "PIXABAY_API_KEY manquant"; exit 0; }
-
-          curl -sS "https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&lang=fr&image_type=photo&per_page=$MI" \
-            | jq -r '.hits[].largeImageURL' \
-            | head -n "$MI" \
-            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/img/pxb_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
-
-          curl -sS "https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&lang=fr&per_page=$MI" \
-            | jq -r '.hits[].videos.tiny.url' \
-            | head -n "$MI" \
-            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/vid/pxb_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
-
-      - name: Fetch from Pexels (photos + videos)
-        env:
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          Q="${{ inputs.query }}"
-          MI=${{ inputs.max_items }}
-          [ -n "${PEXELS_API_KEY:-}" ] || { echo "PEXELS_API_KEY manquant"; exit 0; }
-
-          curl -sS "https://api.pexels.com/v1/search?query=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&per_page=$MI&locale=fr-FR" \
-            -H "Authorization: ${PEXELS_API_KEY}" \
-            | jq -r '.photos[].src.large2x' \
-            | head -n "$MI" \
-            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/img/pxl_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
-
-          curl -sS "https://api.pexels.com/videos/search?query=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&per_page=$MI&locale=fr-FR" \
-            -H "Authorization: ${PEXELS_API_KEY}" \
-            | jq -r '.videos[].video_files | sort_by(.width) | .[0].link' \
-            | head -n "$MI" \
-            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/vid/pxl_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
-
-      - name: Upload media bank
-        uses: actions/upload-artifact@v4
+          mkdir -p bundle
+          cp outputs/images.zip            bundle/
+          cp ${{ inputs.video_path }}      bundle/
+          cp ${{ inputs.captions_path }}   bundle/
+          cp ${{ inputs.voice_path }}      bundle/
+          cp outputs/prompt.txt            bundle/
+          printf "%s\n" "${{ inputs.query }}" > bundle/image_query.txt
+          (cd bundle && zip -r ../media_bank_bundle.zip .)
+      - uses: actions/upload-artifact@v4
         with:
-          name: media-bank
-          path: bank
-          retention-days: 3
+          name: media_bank_bundle
+          path: media_bank_bundle.zip
+          if-no-files-found: error
+          retention-days: 30

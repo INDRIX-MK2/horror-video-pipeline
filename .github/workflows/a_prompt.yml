@@ -3,177 +3,39 @@
 on:
   workflow_call:
     inputs:
-      topic:
-        description: "Sujet de l'histoire"
-        required: true
-        type: string
-      locale:
-        description: "Locale ex. fr-FR"
-        required: true
-        type: string
+      locale: { required: true, type: string }
+      topic:  { required: true, type: string }
     outputs:
-      title:
-        description: "Titre renvoyé par le modèle"
-        value: ${{ jobs.make.outputs.title }}
-      script:
-        description: "Script complet renvoyé par le modèle"
-        value: ${{ jobs.make.outputs.script }}
-      captions:
-        description: "Captions (concaténées par nouvelles lignes)"
-        value: ${{ jobs.make.outputs.captions }}
-      hashtags:
-        description: "Hashtags (concaténés par espaces)"
-        value: ${{ jobs.make.outputs.hashtags }}
+      script_path:
+        description: "Chemin du prompt généré"
+        value: ${{ jobs.generate.outputs.script_path }}
 
 permissions:
   contents: read
 
 jobs:
-  make:
+  generate:
     runs-on: ubuntu-latest
     outputs:
-      title: ${{ steps.expose.outputs.title }}
-      script: ${{ steps.expose.outputs.script }}
-      captions: ${{ steps.expose.outputs.captions }}
-      hashtags: ${{ steps.expose.outputs.hashtags }}
+      script_path: ${{ steps.meta.outputs.script_path }}
     steps:
-      - name: "Checkout"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: "Build prompt payload (GPT-5 Mini)"
-        shell: bash
-        env:
-          SYSTEM_PROMPT: |
-            Tu es un scénariste d’horreur.
-            Langue: ${{ inputs.locale }}
-            Objectif: Produire une histoire courte, immersive, parfaitement compréhensible à l’oral.
-            Renvoyer EXCLUSIVEMENT un JSON avec les champs:
-            - title (string)
-            - script (string)
-            - captions (array de strings)
-            - hashtags (array de strings commençant par #)
-            Contraintes:
-            - Structure: intro → tension → climax → résolution.
-            - Durée orale cible: 65 à 180 secondes.
-            - Captions: 18 à 24 phrases, 55–95 caractères chacune.
-            - Style: français naturel, sombre, sans gore explicite.
-          USER_PROMPT: |
-            Sujet demandé: "${{ inputs.topic }}"
+      - name: Préparer
+        run: mkdir -p outputs
+
+      - name: Générer prompt (placeholder)
         run: |
-          set -Eeuo pipefail
-          jq -n \
-            --arg system "$SYSTEM_PROMPT" \
-            --arg user "$USER_PROMPT" \
-            '{
-              model: "gpt-5-mini",
-              response_format: { type: "json_object" },
-              temperature: 1,
-              messages: [
-                { role: "system", content: $system },
-                { role: "user",   content: $user }
-              ]
-            }' > prompt_payload.json
-          echo "::group::prompt_payload.json"
-          cat prompt_payload.json
-          echo "::endgroup::"
+          printf "Langue=%s\nSujet=%s\n\nHistoire courte...\n" \
+            "${{ inputs.locale }}" "${{ inputs.topic }}" > outputs/prompt.txt
 
-      - name: "Call OpenAI (JSON mode strict)"
-        shell: bash
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          set -Eeuo pipefail
-          http_code=$(curl -sS -w "%{http_code}" -o response_raw.json \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -X POST https://api.openai.com/v1/chat/completions \
-            -d @prompt_payload.json)
-
-          echo "HTTP_CODE=${http_code}"
-          echo "::group::response_raw.json"
-          cat response_raw.json || true
-          echo "::endgroup::"
-
-          if [ "${http_code}" != "200" ]; then
-            echo "API error:"
-            jq -r '.error?.message // empty' response_raw.json || true
-            exit 1
-          fi
-
-          content=$(
-            jq -r '
-              .choices[0].message.content
-              // (.choices[0].message[]? | select(.type=="output_text") | .text)
-              // empty
-            ' response_raw.json
-          )
-
-          if [ -z "$content" ]; then
-            echo "Empty content from model"
-            exit 1
-          fi
-
-          printf '%s' "$content" > response.json
-
-          if ! jq -e . response.json >/dev/null 2>&1; then
-            echo "Model output is not valid JSON"
-            exit 1
-          fi
-
-          echo "::group::response.json"
-          cat response.json
-          echo "::endgroup::"
-
-      - name: "Normalize and save outputs"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          jq -r '.title  // empty' response.json > title.txt
-          jq -r '.script // empty' response.json > script.txt
-          jq -r '.captions // [] | .[]' response.json > captions.txt
-          jq -r '.hashtags // [] | .[]' response.json | sed -n 's/^#*/#/p' > hashtags.txt
-
-          # Construire un aperçu JSON propre pour l’artifact
-          jq -Rs 'split("\n")[:-1]' captions.txt > captions.json
-          jq -Rs 'split("\n")[:-1]' hashtags.txt > hashtags.json
-
-          jq -n \
-            --rawfile title title.txt \
-            --rawfile script script.txt \
-            --slurpfile captions captions.json \
-            --slurpfile hashtags hashtags.json \
-            '{title: $title, script: $script, captions: $captions[0], hashtags: $hashtags[0]}' \
-            > story.json
-
-      - name: "Upload story artifact"
+      - name: Upload prompt
         uses: actions/upload-artifact@v4
         with:
-          name: story-output
-          path: |
-            response.json
-            story.json
-            title.txt
-            script.txt
-            captions.txt
-            hashtags.txt
+          name: prompt_txt
+          path: outputs/prompt.txt
+          if-no-files-found: error
           retention-days: 7
 
-      - name: "Expose outputs"
-        id: expose
-        shell: bash
-        run: |
-          {
-            echo 'title<<EOF'
-            cat title.txt
-            echo 'EOF'
-            echo 'script<<EOF'
-            cat script.txt
-            echo 'EOF'
-            echo 'captions<<EOF'
-            cat captions.txt
-            echo 'EOF'
-            echo 'hashtags<<EOF'
-            tr '\n' ' ' < hashtags.txt | sed 's/  */ /g'
-            echo
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+      - id: meta
+        run: echo "script_path=outputs/prompt.txt" >> "$GITHUB_OUTPUT"

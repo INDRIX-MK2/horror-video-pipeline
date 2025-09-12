@@ -1,102 +1,53 @@
-﻿name: Generate SRT from captions + align to VO
+﻿name: d_generate_subtitles
 
 on:
   workflow_call:
     inputs:
-      min_lines:
+      script_path:
+        required: true
+        type: string
+      subtitles_fontsize:
         required: false
         type: number
-        default: 18
-      max_lines:
+      subtitles_margin_v:
         required: false
         type: number
-        default: 24
+    outputs:
+      captions_path:
+        description: "Chemin du SRT"
+        value: ${{ jobs.subs.outputs.captions_path }}
+
+permissions:
+  contents: read
 
 jobs:
-  srt:
+  subs:
     runs-on: ubuntu-latest
+    outputs:
+      captions_path: ${{ steps.meta.outputs.captions_path }}
     steps:
-      - name: Download story + voice artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: story-output
-
-      - name: Download voiceover
-        uses: actions/download-artifact@v4
-        with:
-          name: voiceover
-
-      - name: Build SRT (sans heredoc, 100% bash/awk)
-        shell: bash
+          name: prompt_txt
+          path: .
+      - name: Générer SRT (placeholder)
         run: |
-          set -Eeuo pipefail
+          mkdir -p outputs
+          cat > outputs/subtitles.srt <<'EOF'
+          1
+          00:00:00,000 --> 00:00:02,000
+          Titre d'intro
 
-          test -s captions.txt || { echo "captions.txt manquant"; exit 1; }
-          test -s voice.mp3 || { echo "voice.mp3 manquant"; exit 1; }
-
-          # Durée de la voix (secondes, float)
-          dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 voice.mp3)
-          dur=${dur%.*}.${dur#*.} # garder float
-
-          # Nombre de lignes (borne dans [min,max])
-          n=$(wc -l < captions.txt)
-          min=${{ inputs.min_lines }}
-          max=${{ inputs.max_lines }}
-          if [ "$n" -lt "$min" ]; then
-            # Duplique la dernière jusqu'au min
-            last=$(tail -n1 captions.txt)
-            while [ "$n" -lt "$min" ]; do
-              echo "$last" >> captions.txt
-              n=$((n+1))
-            done
-          fi
-          if [ "$n" -gt "$max" ]; then
-            head -n "$max" captions.txt > captions.tmp && mv captions.tmp captions.txt
-            n=$max
-          fi
-
-          # Temps par ligne
-          # On met un petit gap 0.12s entre lignes pour lisibilité
-          gap=0.12
-          seg=$(awk -v D="$dur" -v N="$n" -v G="$gap" 'BEGIN{print (D - (N-1)*G)/N}')
-
-          # Fonction AWK format timestamp SRT
-          ts_awka='
-            function ts(s,  h,m,sec,ms,whole) {
-              if (s < 0) s = 0;
-              h=int(s/3600); m=int((s%3600)/60); sec=s-(h*3600+m*60);
-              whole=int(sec); ms=int((sec-whole)*1000+0.5);
-              printf("%02d:%02d:%02d,%03d", h,m,whole,ms);
-            }
-            { print }
-          '
-
-          i=0
-          : > subs.srt
-          while IFS= read -r line; do
-            i=$((i+1))
-            # start/end
-            start=$(awk -v S="$seg" -v G="$gap" -v I="$i" 'BEGIN{print (I-1)*(S+G)}')
-            end=$(awk -v st="$start" -v S="$seg" 'BEGIN{print st+S}')
-            # écrire bloc
-            echo "$i" >> subs.srt
-            awk "$ts_awka" <<< "" >/dev/null 2>&1
-            awk -v s="$start" "$ts_awka" <<< "" | head -n1 | awk '{print}' | sed 's/^$/00:00:00,000/'
-            awk -v e="$end"   "$ts_awka" <<< "" | head -n1 | awk '{print}' | sed 's/^$/00:00:00,000/' \
-              | paste -d' ' <(awk -v s="$start" "$ts_awka" <<< "" | head -n1) - \
-              | sed 's/$/ --> /; s/ --> .* / --> /' > _range.txt
-
-            # Récup intervalle propre
-            rng=$(cat _range.txt)
-            echo "$rng" >> subs.srt
-            echo "$line" >> subs.srt
-            echo "" >> subs.srt
-          done < captions.txt
-          rm -f _range.txt
-
-      - name: Upload subtitles
-        uses: actions/upload-artifact@v4
+          2
+          00:00:02,000 --> 00:00:04,000
+          Sous-titres d'exemple
+          EOF
+      - uses: actions/upload-artifact@v4
         with:
-          name: subtitles
-          path: subs.srt
+          name: subtitles_srt
+          path: outputs/subtitles.srt
+          if-no-files-found: error
           retention-days: 7
+      - id: meta
+        run: echo "captions_path=outputs/subtitles.srt" >> "$GITHUB_OUTPUT"

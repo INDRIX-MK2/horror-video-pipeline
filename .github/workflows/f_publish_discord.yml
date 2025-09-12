@@ -1,25 +1,37 @@
-﻿name: Publish to Discord
+﻿name: f_publish_discord
 
 on:
   workflow_call:
-    secrets:
-      DISCORD_WEBHOOK_URL:
+    inputs:
+      locale:
         required: true
+        type: string
+      video_path:
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  send:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: final-video
+      - uses: actions/checkout@v4
 
-      - name: Send to Discord
+      - name: Télécharger la vidéo
+        uses: actions/download-artifact@v4
+        with:
+          name: final_video_mp4
+          path: .
+
+      - name: Envoyer sur Discord
         env:
-          WH: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        shell: bash
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          set -Eeuo pipefail
-          curl -sS -F "payload_json={\"content\":\"Nouvelle vidéo générée\"}" \
-                   -F "file1=@final.mp4;type=video/mp4" \
-                   "$WH" > /dev/null
+          test -n "$DISCORD_WEBHOOK_URL"
+          printf '{"content":"🎬 Nouvelle vidéo (%s)"}' "${{ inputs.locale }}" > payload.json
+          curl -sS -X POST \
+            -F "payload_json=@payload.json" \
+            -F "file=@${{ inputs.video_path }};type=video/mp4" \
+            "$DISCORD_WEBHOOK_URL"

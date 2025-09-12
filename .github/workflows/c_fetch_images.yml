@@ -1,69 +1,43 @@
-﻿name: Fetch images/clips
+﻿name: c_fetch_images
 
 on:
   workflow_call:
     inputs:
-      extra_query:
+      query:
+        required: true
         type: string
-        required: false
-        default: ""
-    secrets:
-      PEXELS_API_KEY:
-        required: false
-      PIXABAY_API_KEY:
-        required: false
+      target_res:
+        required: true
+        type: string
+    outputs:
+      images_zip:
+        description: "Archive des images"
+        value: ${{ jobs.fetch.outputs.images_zip }}
+
+permissions:
+  contents: read
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    outputs:
+      images_zip: ${{ steps.meta.outputs.images_zip }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: story-output
-
-      - name: Download media bank
-        uses: actions/download-artifact@v4
-        with:
-          name: media-bank
-          path: bank
-
-      - name: Build frame list (24 max), prefer images then short clips (muted)
-        shell: bash
+      - uses: actions/checkout@v4
+      - name: Générer images factices
         run: |
-          set -Eeuo pipefail
-          mkdir -p frames
-          i=0
-          # 1) bank images
-          for f in bank/images/*; do
-            [ -f "$f" ] || continue
-            i=$((i+1))
-            convert "$f" -resize "720x1280^" -gravity center -extent 720x1280 "frames/frame_$(printf "%03d" "$i").jpg"
-            [ $i -ge 24 ] && break
-          done
-          # 2) bank clips → extract 1 frame per second for a few secs (mute at render)
-          if [ $i -lt 24 ]; then
-            for v in bank/clips/*.mp4; do
-              [ -f "$v" ] || continue
-              ffmpeg -loglevel error -y -i "$v" -vf "fps=1,scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2" -frames:v 3 "frames/tmp_%03d.jpg"
-              for f in frames/tmp_*.jpg; do
-                [ -f "$f" ] || continue
-                i=$((i+1)); mv "$f" "frames/frame_$(printf "%03d" "$i").jpg"
-                [ $i -ge 24 ] && break 2
-              done
-            done
-            rm -f frames/tmp_*.jpg || true
-          fi
-          # Safety: ensure at least 18 frames (repeat last)
-          last=""; last=$(ls -1 frames/frame_*.jpg | tail -n1 || true)
-          cnt=$(ls -1 frames/frame_*.jpg 2>/dev/null | wc -l || true)
-          while [ "$cnt" -lt 18 ] && [ -n "$last" ]; do
-            cnt=$((cnt+1))
-            cp "$last" "frames/frame_$(printf "%03d" "$cnt").jpg"
-          done
-
-      - name: Upload images artifact
-        uses: actions/upload-artifact@v4
+          sudo apt-get update && sudo apt-get install -y ffmpeg zip
+          mkdir -p outputs/images
+          RES="${{ inputs.target_res }}"
+          ffmpeg -f lavfi -i color=c=black:s=$RES:d=1 -frames:v 1 outputs/images/0001.png -y
+          ffmpeg -f lavfi -i color=c=gray:s=$RES:d=1  -frames:v 1 outputs/images/0002.png -y
+          ffmpeg -f lavfi -i color=c=white:s=$RES:d=1 -frames:v 1 outputs/images/0003.png -y
+          (cd outputs && zip -r images.zip images)
+      - uses: actions/upload-artifact@v4
         with:
-          name: images
-          path: frames
+          name: images_zip
+          path: outputs/images.zip
+          if-no-files-found: error
           retention-days: 7
+      - id: meta
+        run: echo "images_zip=outputs/images.zip" >> "$GITHUB_OUTPUT"
