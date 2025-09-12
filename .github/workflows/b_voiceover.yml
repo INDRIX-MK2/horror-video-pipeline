@@ -1,0 +1,36 @@
+﻿name: Voiceover
+
+on:
+  workflow_call:
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+
+jobs:
+  tts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: story-output
+
+      - name: Synthesize voice (mp3)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          text="$(cat script.txt)"
+          # Exemple TTS (remplace par ton moteur TTS si besoin)
+          curl -sS -X POST https://api.openai.com/v1/audio/speech \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-omni-tts","voice":"alloy","input":'"$(jq -Rs . <<<"$text")"'}' \
+            --output voice.mp3
+
+      - name: Upload voiceover
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceover
+          path: voice.mp3
+          retention-days: 7

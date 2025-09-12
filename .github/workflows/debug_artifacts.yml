@@ -1,0 +1,36 @@
+﻿name: Debug Artifacts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: story-output
+          path: story/
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+          path: imgs/
+      - uses: actions/download-artifact@v4
+        with:
+          name: voiceover
+          path: audio/
+      - uses: actions/download-artifact@v4
+        with:
+          name: subtitles
+          path: subs/
+
+      - name: List files
+        run: |
+          set -Eeuo pipefail
+          echo "=== STORY ==="; ls -lh story/ || true
+          echo "=== IMAGES ==="; ls -lh imgs/ || true
+          echo "=== AUDIO ==="; ls -lh audio/ || true
+          echo "=== SUBS ==="; ls -lh subs/ || true
+          echo "=== durations.txt head ==="; head -n 20 audio/durations.txt || true
+          echo "Count images:"; find imgs/ -type f | wc -l

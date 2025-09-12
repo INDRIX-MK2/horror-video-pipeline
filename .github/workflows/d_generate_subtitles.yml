@@ -1,0 +1,45 @@
+﻿name: Generate subtitles
+
+on:
+  workflow_call: {}
+
+jobs:
+  subs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: story-output
+
+      - name: Make simple SRT from captions (2.5–3.5s each)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dur_min=2.5
+          dur_max=3.5
+          t0=0
+          n=0
+          : > subs.srt
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            n=$((n+1))
+            d=$(awk -v a=$dur_min -v b=$dur_max 'BEGIN{srand(); print a+rand()*(b-a)}')
+            t1=$(awk -v t=$t0 -v d=$d 'BEGIN{printf "%.2f", t+d}')
+            ts() { python3 - "$1" <<'PY'
+import sys,math
+s=float(sys.argv[1]);h=int(s//3600);m=int((s%3600)//60);sec=s%60
+print(f"{h:02d}:{m:02d}:{sec:06.3f}".replace('.',','))
+PY
+            }
+            echo "$n" >> subs.srt
+            echo "$(ts $t0) --> $(ts $t1)" >> subs.srt
+            echo "$line" >> subs.srt
+            echo >> subs.srt
+            t0=$t1
+          done < captions.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subtitles
+          path: subs.srt
+          retention-days: 7

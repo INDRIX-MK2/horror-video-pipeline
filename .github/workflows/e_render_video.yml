@@ -1,0 +1,82 @@
+﻿name: Render video
+
+on:
+  workflow_call:
+    inputs:
+      target_res:
+        type: string
+        default: "720x1280"
+      fps:
+        type: number
+        default: 30
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: images
+          path: frames
+      - uses: actions/download-artifact@v4
+        with:
+          name: subtitles
+      - uses: actions/download-artifact@v4
+        with:
+          name: voiceover
+      - uses: actions/download-artifact@v4
+        with:
+          name: story-output
+
+      - name: Compute durations (match number of frames to voice length)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Voice duration
+          vd=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 voice.mp3)
+          [ -z "$vd" ] && vd=70
+          n=$(ls -1 frames/frame_*.jpg | wc -l)
+          [ "$n" -lt 18 ] && n=18
+          # Per-image duration
+          pi=$(python3 - <<PY
+vd=float("${vd}")
+n=int("${n}")
+# clamp to 65..180s overall by stretching stills
+if vd < 65: vd = 65.0
+if vd > 180: vd = 180.0
+print(vd/n)
+PY
+)
+          printf "%.3f" "$pi" > dur.txt
+
+      - name: Build slideshow with muted clips (images only) + add voice + fade-out
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dur=$(cat dur.txt)
+          # Make video from images
+          ffmpeg -y -loglevel error -framerate ${{ inputs.fps }} \
+            -pattern_type glob -i 'frames/frame_*.jpg' \
+            -vf "fps=${{ inputs.fps }},format=yuv420p,scale=${{ inputs.target_res }}" \
+            -r ${{ inputs.fps }} -t "$(python3 - <<PY
+import glob,sys,os
+n=len(glob.glob('frames/frame_*.jpg'))
+d=float(open('dur.txt').read())
+print(n*d)
+PY
+)" \
+            -pix_fmt yuv420p -c:v libx264 -preset veryfast -movflags +faststart \
+            video_novoice.mp4
+
+          # Add voice (and keep video muted)
+          ffmpeg -y -loglevel error -i video_novoice.mp4 -i voice.mp3 \
+            -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest merged.mp4
+
+          # Burn subtitles (centered), smaller font
+          ffmpeg -y -loglevel error -i merged.mp4 -vf "subtitles=subs.srt:force_style='Fontsize=18,PrimaryColour=&H00FFFFFF&,OutlineColour=&H00404040&,BorderStyle=3,Outline=2,Shadow=0,Alignment=2'" -c:a copy final.mp4
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: final.mp4
+          retention-days: 7

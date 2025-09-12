@@ -1,0 +1,63 @@
+﻿name: Video pipeline (one-click)
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Video topic"
+        required: true
+      locale:
+        description: "Locale e.g. fr-FR"
+        required: true
+        default: fr-FR
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gen-prompt:
+    uses: ./.github/workflows/a_prompt.yml
+    with:
+      topic: ${{ inputs.topic }}
+      locale: ${{ inputs.locale }}
+    secrets: inherit
+
+  voiceover:
+    needs: gen-prompt
+    uses: ./.github/workflows/b_voiceover.yml
+    secrets: inherit
+
+  update-bank:
+    uses: ./.github/workflows/g_build_media_bank.yml
+    with:
+      query: "horreur, peur, angoisse"
+    secrets: inherit
+
+  images:
+    needs: [gen-prompt, update-bank]
+    uses: ./.github/workflows/c_fetch_images.yml
+    with:
+      extra_query: "horreur sombre"
+    secrets: inherit
+
+  subtitles:
+    needs: [gen-prompt, voiceover]
+    uses: ./.github/workflows/d_generate_subtitles.yml
+    secrets: inherit
+
+  render:
+    needs: [images, subtitles, voiceover, gen-prompt]
+    uses: ./.github/workflows/e_render_video.yml
+    with:
+      target_res: "720x1280"
+      fps: 30
+    secrets: inherit
+
+  publish:
+    needs: render
+    uses: ./.github/workflows/f_publish_discord.yml
+    secrets: inherit
