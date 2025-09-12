@@ -4,12 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       topic:
-        description: "Video topic"
+        description: "Sujet de la vidéo"
+        type: string
         required: true
       locale:
-        description: "Locale e.g. fr-FR"
+        description: "Locale (ex: fr-FR)"
+        type: string
         required: true
         default: fr-FR
+      media_query:
+        description: "Mots-clés banque médias (horreur, peur, angoisse, etc.)"
+        type: string
+        required: false
+        default: "horreur, peur, angoisse, frisson, cauchemar"
 
 permissions:
   contents: read
@@ -19,6 +26,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  media-bank:
+    uses: ./.github/workflows/g_build_media_bank.yml
+    with:
+      query: ${{ inputs.media_query }}
+      max_items: 40
+    secrets: inherit
+
   gen-prompt:
     uses: ./.github/workflows/a_prompt.yml
     with:
@@ -29,34 +43,43 @@ jobs:
   voiceover:
     needs: gen-prompt
     uses: ./.github/workflows/b_voiceover.yml
+    with:
+      locale: ${{ inputs.locale }}
     secrets: inherit
 
-  update-bank:
-    uses: ./.github/workflows/g_build_media_bank.yml
-    with:
-      query: "horreur, peur, angoisse"
-    secrets: inherit
-
-  images:
-    needs: [gen-prompt, update-bank]
-    uses: ./.github/workflows/c_fetch_images.yml
-    with:
-      extra_query: "horreur sombre"
-    secrets: inherit
+  # Pas de job "images" ici pour éviter les erreurs d'inputs manquants.
+  # Le rendu pioche directement dans 'media-bank' (+ éventuels médias déjà fetchés).
 
   subtitles:
-    needs: [gen-prompt, voiceover]
+    needs:
+      - gen-prompt
+      - voiceover
     uses: ./.github/workflows/d_generate_subtitles.yml
+    with:
+      min_lines: 18
+      max_lines: 24
     secrets: inherit
 
   render:
-    needs: [images, subtitles, voiceover, gen-prompt]
+    needs:
+      - media-bank
+      - subtitles
+      - voiceover
+      - gen-prompt
     uses: ./.github/workflows/e_render_video.yml
     with:
       target_res: "720x1280"
       fps: 30
+      min_duration_sec: 65
+      max_duration_sec: 180
+      mute_stock_clips: true
+      subtitles_fontsize: 28
+      subtitles_margin_v: 80
     secrets: inherit
 
+  # Garde ce job uniquement si tu as bien ce workflow :
+  # .github/workflows/f_publish_discord.yml
+  # Sinon, supprime ce bloc.
   publish:
     needs: render
     uses: ./.github/workflows/f_publish_discord.yml

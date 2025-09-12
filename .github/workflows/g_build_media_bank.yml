@@ -1,66 +1,71 @@
-name: Build media bank
+name: Build Media Bank (Pixabay + Pexels)
 
 on:
   workflow_call:
     inputs:
       query:
+        required: true
         type: string
+      max_items:
         required: false
-        default: "horreur, peur, angoisse"
-    secrets:
-      PEXELS_API_KEY:
-        required: false
-      PIXABAY_API_KEY:
-        required: false
+        type: number
+        default: 40
 
 jobs:
   bank:
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare folders
+      - name: Prepare dirs
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p bank/images bank/clips
+          mkdir -p bank/img bank/vid
 
-      - name: Fetch from Pexels (if key)
-        if: ${{ secrets.PEXELS_API_KEY != '' }}
-        env:
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          q=$(printf "%s" "${{ inputs.query }}" | tr ' ' '+')
-          curl -sS -H "Authorization: $PEXELS_API_KEY" \
-            "https://api.pexels.com/v1/search?query=$q&per_page=30" > pexels.json
-          jq -r '.photos[].src.large' pexels.json | head -n 20 | xargs -I{} -n1 -P4 curl -sS -L {} -o "bank/images/pex_$(date +%s%N)_img.jpg"
-          jq -r '.videos[].video_files[] | select(.quality=="sd") | .link' pexels.json | head -n 10 | xargs -I{} -n1 -P2 curl -sS -L {} -o "bank/clips/pex_$(date +%s%N)_clip.mp4" || true
-
-      - name: Fetch from Pixabay (if key)
-        if: ${{ secrets.PIXABAY_API_KEY != '' }}
+      - name: Fetch from Pixabay (photos + tiny videos)
         env:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          q=$(python3 - <<'PY'
-          import urllib.parse, os
-          print(urllib.parse.quote_plus(os.environ["Q"]))
-PY
-          )
+          Q="${{ inputs.query }}"
+          MI=${{ inputs.max_items }}
+          [ -n "${PIXABAY_API_KEY:-}" ] || { echo "PIXABAY_API_KEY manquant"; exit 0; }
+
+          curl -sS "https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&lang=fr&image_type=photo&per_page=$MI" \
+            | jq -r '.hits[].largeImageURL' \
+            | head -n "$MI" \
+            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/img/pxb_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
+
+          curl -sS "https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&lang=fr&per_page=$MI" \
+            | jq -r '.hits[].videos.tiny.url' \
+            | head -n "$MI" \
+            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/vid/pxb_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
+
+      - name: Fetch from Pexels (photos + videos)
         env:
-          Q: ${{ inputs.query }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          curl -sS "https://pixabay.com/api/?key=${{ secrets.PIXABAY_API_KEY }}&q=$Q&image_type=photo&per_page=30" > pixa_img.json
-          jq -r '.hits[].largeImageURL' pixa_img.json | head -n 20 | xargs -I{} -n1 -P4 curl -sS -L {} -o "bank/images/pixa_$(date +%s%N)_img.jpg"
-          curl -sS "https://pixabay.com/api/videos/?key=${{ secrets.PIXABAY_API_KEY }}&q=$Q&per_page=20" > pixa_vid.json
-          jq -r '.hits[].videos.tiny.url' pixa_vid.json | head -n 10 | xargs -I{} -n1 -P2 curl -sS -L {} -o "bank/clips/pixa_$(date +%s%N)_clip.mp4" || true
+          Q="${{ inputs.query }}"
+          MI=${{ inputs.max_items }}
+          [ -n "${PEXELS_API_KEY:-}" ] || { echo "PEXELS_API_KEY manquant"; exit 0; }
+
+          curl -sS "https://api.pexels.com/v1/search?query=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&per_page=$MI&locale=fr-FR" \
+            -H "Authorization: ${PEXELS_API_KEY}" \
+            | jq -r '.photos[].src.large2x' \
+            | head -n "$MI" \
+            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/img/pxl_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
+
+          curl -sS "https://api.pexels.com/videos/search?query=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote_plus(os.environ["Q"]))')&per_page=$MI&locale=fr-FR" \
+            -H "Authorization: ${PEXELS_API_KEY}" \
+            | jq -r '.videos[].video_files | sort_by(.width) | .[0].link' \
+            | head -n "$MI" \
+            | xargs -I{} -n1 -P4 sh -c 'u="$1"; fn="bank/vid/pxl_$(basename "$u" | cut -d? -f1)"; curl -sS -L "$u" -o "$fn"' sh {}
 
       - name: Upload media bank
         uses: actions/upload-artifact@v4
         with:
           name: media-bank
           path: bank
-          retention-days: 7
+          retention-days: 3

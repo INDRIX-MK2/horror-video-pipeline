@@ -1,34 +1,56 @@
-﻿name: Voiceover
+﻿name: VoiceOver (ElevenLabs)
 
 on:
   workflow_call:
-    secrets:
-      OPENAI_API_KEY:
+    inputs:
+      locale:
         required: true
+        type: string
 
 jobs:
-  tts:
+  vo:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download story
+        uses: actions/download-artifact@v4
         with:
           name: story-output
 
-      - name: Synthesize voice (mp3)
+      - name: Synthesize with ElevenLabs
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          text="$(cat script.txt)"
-          # Exemple TTS (remplace par ton moteur TTS si besoin)
-          curl -sS -X POST https://api.openai.com/v1/audio/speech \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"gpt-omni-tts","voice":"alloy","input":'"$(jq -Rs . <<<"$text")"'}' \
-            --output voice.mp3
+          test -s script.txt || { echo "script.txt manquant"; exit 1; }
+          [ -n "${ELEVENLABS_API_KEY:-}" ] || { echo "ELEVENLABS_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_VOICE_ID:-}" ] || { echo "ELEVENLABS_VOICE_ID manquant"; exit 1; }
 
-      - name: Upload voiceover
+          # On coupe les très longs textes par paragraphes pour fiabilité, puis on concatène
+          mkdir -p vo_parts
+          i=0
+          awk -v RS="" '{print > sprintf("vo_parts/part_%03d.txt", NR-1)}' script.txt
+
+          : > voice.mp3
+          for p in vo_parts/*.txt; do
+            body=$(jq -n --arg t "$(cat "$p")" \
+              '{text:$t,model_id:"eleven_multilingual_v2",
+                voice_settings:{stability:0.5,similarity_boost:0.75},
+                optimize_streaming_latency:0}')
+            curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
+              -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+              -H "Accept: audio/mpeg" \
+              -H "Content-Type: application/json" \
+              -d "$body" \
+              --output part.mp3
+            ffmpeg -y -loglevel error -i "concat:voice.mp3|part.mp3" -c copy voice_tmp.mp3 || \
+              ffmpeg -y -loglevel error -i voice.mp3 -i part.mp3 -filter_complex "[0:a][1:a]concat=n=2:v=0:a=1" voice_tmp.mp3
+            mv voice_tmp.mp3 voice.mp3
+            i=$((i+1))
+          done
+
+      - name: Upload VO
         uses: actions/upload-artifact@v4
         with:
           name: voiceover

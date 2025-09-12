@@ -1,47 +1,58 @@
-﻿name: Generate prompt
+﻿name: Generate story JSON
 
 on:
   workflow_call:
     inputs:
       topic:
-        description: "Video topic"
-        type: string
         required: true
+        type: string
       locale:
-        description: "Locale like fr-FR"
+        required: true
         type: string
-        required: true
-    secrets:
-      OPENAI_API_KEY:
-        required: true
-
-permissions:
-  contents: read
+        default: fr-FR
+    outputs:
+      title:
+        description: "Titre court"
+        value: ${{ jobs.make.outputs.title }}
+      script:
+        description: "Script voix off"
+        value: ${{ jobs.make.outputs.script }}
+      captions:
+        description: "Captions concaténées (une par ligne)"
+        value: ${{ jobs.make.outputs.captions }}
+      hashtags:
+        description: "Hashtags concaténés (un par ligne)"
+        value: ${{ jobs.make.outputs.hashtags }}
 
 jobs:
-  prompt:
+  make:
     runs-on: ubuntu-latest
+    outputs:
+      title: ${{ steps.expose.outputs.title }}
+      script: ${{ steps.expose.outputs.script }}
+      captions: ${{ steps.expose.outputs.captions }}
+      hashtags: ${{ steps.expose.outputs.hashtags }}
     steps:
-      - name: Prepare system and user prompts
+      - name: Build user instruction (compact, sans heredoc)
         shell: bash
         run: |
           set -Eeuo pipefail
-          printf "Tu es un scénariste d’horreur.\nLangue: %s\n" "${{ inputs.locale }}" > system.txt
-          cat > user.txt <<'TXT'
-Rédige une narration d'horreur longue et immersive en fr-FR, inspirée par le sujet indiqué par l'utilisateur.
+          printf "%s\n" \
+            "Rédige une narration d'horreur immersive en ${{
+              inputs.locale
+            }} inspirée par le sujet: «${{ inputs.topic }}»." \
+            "" \
+            "Exigences:" \
+            "1) Structure : intro → tension → climax → résolution." \
+            "2) Durée orale : 65 à 180 secondes (style naturel, fluide)." \
+            "3) Captions : 18 à 24 phrases, 55–95 caractères chacune." \
+            "4) Hashtags : 6 à 10 éléments commençant par #." \
+            "" \
+            "Renvoie STRICTEMENT ce JSON :" \
+            "{ \"title\": \"string\", \"script\": \"string\", \"captions\": [\"string\", ...], \"hashtags\": [\"#string\", ...] }" \
+            > user.txt
 
-Exigences :
-1) Structure : intro → tension → climax → résolution.
-2) Durée orale : 65 à 180 secondes (style naturel, fluide).
-3) Captions : 18 à 24 phrases, 55–95 caractères chacune.
-4) Hashtags : 6 à 10 éléments commençant par #.
-
-Renvoie STRICTEMENT ce JSON :
-{ "title": "string", "script": "string", "captions": ["string", ...], "hashtags": ["#string", ...] }
-TXT
-          printf "%s" "${{ inputs.topic }}" > topic.txt
-
-      - name: Call OpenAI (JSON mode strict)
+      - name: Call OpenAI (JSON mode)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         shell: bash
@@ -50,48 +61,55 @@ TXT
           curl -sS https://api.openai.com/v1/chat/completions \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d @- > response.json <<'JSON'
-          {
-            "model": "gpt-5.1-mini",
-            "response_format": { "type": "json_object" },
-            "messages": [
-              { "role": "system", "content": "'"$(sed "s/'/'\"'\"'/g" system.txt)"'" },
-              { "role": "user", "content": "Sujet: "'"$(sed "s/'/'\"'\"'/g" topic.txt)"'"\n\n"'"$(sed "s/'/'\"'\"'/g" user.txt)"'" }
-            ]
-          }
-JSON
+            -d "$(jq -n --arg u "$(cat user.txt)" \
+                    '{model:"gpt-4o-mini",
+                      response_format:{type:"json_object"},
+                      messages:[{role:"system",content:"Tu renvoies uniquement un JSON valide."},
+                                {role:"user",content:$u}] }')" \
+            > response.json
 
-      - name: Normalize & save outputs
+          # Normaliser / valider
+          jq '
+            .choices[0].message.content
+            | fromjson
+            | {
+                title:    (.title // "" | tostring),
+                script:   (.script // "" | tostring),
+                captions: ((.captions // []) | map(tostring) | map(. | gsub("\\s+";" ") | .[:120]) | .[:24]),
+                hashtags: ((.hashtags // []) | map(tostring) | map( if startswith("#") then . else "#"+. end ) | .[:10])
+              }
+          ' response.json > story.json
+
+          jq -r '.title' story.json > title.txt
+          jq -r '.script' story.json > script.txt
+          jq -r '.captions[]' story.json > captions.txt
+          jq -r '.hashtags[]' story.json > hashtags.txt
+
+      - name: Expose outputs
+        id: expose
         shell: bash
         run: |
-          set -Eeuo pipefail
-          # Title & script
-          jq -r '.title // ""'  response.json | tr -s ' ' | sed 's/^ *//;s/ *$//' | cut -c1-140 > title.txt
-          jq -r '.script // ""' response.json | tr -s ' ' | sed 's/^ *//;s/ *$//' > script.txt
-          # Captions (18–24, 55–95 chars)
-          jq -r '.captions // [] | .[]' response.json | sed 's/^ *//;s/ *$//' > captions_raw.txt
-          awk '
-            function clamp(s,   n,i,last) {
-              gsub(/[[:space:]]+/, " ", s); sub(/^ +| +$/, "", s);
-              n=length(s); if (n<=95) return s;
-              for (i=95;i>=55;i--) if (substr(s,i,1) ~ /[ ,.;:!?]/) {last=i; break}
-              if (!last) last=95; return substr(s,1,last) "…"
-            }
-            { print clamp($0) }
-          ' captions_raw.txt > captions_tmp.txt
-          lines=$(wc -l < captions_tmp.txt || true)
-          if [ "$lines" -lt 18 ] && [ "$lines" -gt 0 ]; then
-            while [ "$lines" -lt 18 ]; do tail -n1 captions_tmp.txt >> captions_tmp.txt; lines=$((lines+1)); done
-          fi
-          if [ "$lines" -gt 24 ]; then head -n 24 captions_tmp.txt > captions.txt; else cp captions_tmp.txt captions.txt; fi
-          # Hashtags
-          jq -r '.hashtags // [] | .[]' response.json | sed -n 's/^#*/#/p' | head -n 10 > hashtags.txt
+          {
+            echo 'title<<EOF'
+            cat title.txt
+            echo 'EOF'
+            echo 'script<<EOF'
+            cat script.txt
+            echo 'EOF'
+            echo 'captions<<EOF'
+            cat captions.txt
+            echo 'EOF'
+            echo 'hashtags<<EOF'
+            cat hashtags.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload story artifact
         uses: actions/upload-artifact@v4
         with:
           name: story-output
           path: |
+            story.json
             response.json
             title.txt
             script.txt
