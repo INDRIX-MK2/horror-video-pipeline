@@ -23,14 +23,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: final_video_mp4
-          path: .
+          path: outputs
+
+      - name: Vérifier vidéo avant envoi
+        run: |
+          echo "Chemin attendu : ${{ inputs.video_path }}"
+          ls -lh "${{ inputs.video_path }}" || (echo "VIDÉO MANQUANTE !" && exit 1)
 
       - name: Envoyer sur Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           test -n "$DISCORD_WEBHOOK_URL"
-          printf '{"content":"🎬 Nouvelle vidéo (%s)"}' "${{ inputs.locale }}" > payload.json
+          echo '{"content":"🎬 Nouvelle vidéo !"}' > payload.json
           curl -sS -X POST \
             -F "payload_json=@payload.json" \
             -F "file=@${{ inputs.video_path }};type=video/mp4" \
