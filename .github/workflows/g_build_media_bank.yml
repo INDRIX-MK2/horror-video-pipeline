@@ -3,72 +3,166 @@ name: build_mediabank
 on:
   workflow_dispatch:
     inputs:
-      fill_mediabank:
-        description: "Remplir la banque média (true/false)"
-        required: true
-        default: "true"
       theme:
-        description: "Mot-clé ou liste de mots-clés séparés par des virgules"
+        description: "Thème(s) séparés par des virgules (ex: horror, dark alley, haunted house)"
         required: true
         default: "horror, dark alley, haunted house"
+      images_count:
+        description: "Nombre d'images à récupérer (total, multi-thèmes confondus)"
+        required: true
+        default: "100"
+      videos_count:
+        description: "Nombre de vidéos à récupérer (total, multi-thèmes confondus)"
+        required: true
+        default: "100"
 
 jobs:
   build_mediabank:
-    if: ${{ github.event.inputs.fill_mediabank == 'true' }}
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq wget
+      - name: Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl wget
 
       - name: Create folders
         run: |
+          set -euo pipefail
           mkdir -p media_bank/images
           mkdir -p media_bank/videos
 
-      # =============================
-      # PEXELS - IMAGES
-      # =============================
-      - name: Download images from Pexels (100)
+      - name: Download images from Pexels (robuste)
         env:
-          THEME: ${{ github.event.inputs.theme }}
+          THEMES_RAW: ${{ github.event.inputs.theme }}
+          WANT: ${{ github.event.inputs.images_count }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
-          for keyword in $(echo "$THEME" | tr ',' ' '); do
-            echo "Téléchargement d'images pour: $keyword"
-            for i in $(seq 1 20); do
-              URL=$(curl -s "https://api.pexels.com/v1/search?query=$keyword&per_page=1&page=$i" \
-                -H "Authorization: $PEXELS_API_KEY" | jq -r '.photos[0].src.large')
-              if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-                wget -q -O "media_bank/images/${keyword}_${i}.jpg" "$URL"
+          set -euo pipefail
+
+          if [ -z "${PEXELS_API_KEY:-}" ]; then
+            echo "WARN: PEXELS_API_KEY manquant — on saute Pexels images."
+            exit 0
+          fi
+
+          # Split des thèmes par virgule, trim, encodage URL
+          mapfile -t THEMES < <(printf '%s\n' "$THEMES_RAW" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | awk 'NF')
+          encode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
+
+          saved=0
+          target="${WANT}"
+
+          for t in "${THEMES[@]}"; do
+            [ "$saved" -ge "$target" ] && break
+            qt=$(encode "$t")
+            page=1
+            per_page=30
+            # boucle sur pages tant qu'on a besoin
+            while [ "$saved" -lt "$target" ] && [ "$page" -le 10 ]; do
+              # Appel API
+              resp_json=$(curl -sS -H "Authorization: ${PEXELS_API_KEY}" \
+                "https://api.pexels.com/v1/search?query=${qt}&per_page=${per_page}&page=${page}") || resp_json="{}"
+
+              # Vérifie qu'il y a au moins une photo
+              count=$(printf '%s' "$resp_json" | jq '.photos | length' 2>/dev/null || echo 0)
+              if [ "$count" -eq 0 ]; then
+                echo "Pexels: aucun résultat pour '$t' page $page"
+                page=$((page+1))
+                continue
               fi
+
+              # Télécharge chaque URL originale si elle existe
+              for idx in $(seq 0 $((count-1))); do
+                [ "$saved" -ge "$target" ] && break
+                url=$(printf '%s' "$resp_json" | jq -r ".photos[$idx].src.original // empty")
+                if [ -n "$url" ]; then
+                  out="media_bank/images/pexels_${t// /_}_${page}_${idx}.jpg"
+                  # Utilise curl et ne casse pas le job si une URL échoue
+                  if curl -sSL --fail -o "$out" "$url"; then
+                    echo "Image enregistrée: $out"
+                    saved=$((saved+1))
+                  else
+                    echo "WARN: échec téléchargement (Pexels) → $url"
+                    rm -f "$out" || true
+                  fi
+                fi
+              done
+              page=$((page+1))
             done
           done
 
-      # =============================
-      # PIXABAY - VIDEOS
-      # =============================
-      - name: Download videos from Pixabay (100)
+          echo "Total images Pexels: $saved"
+
+      - name: Download videos from Pixabay (robuste)
         env:
-          THEME: ${{ github.event.inputs.theme }}
+          THEMES_RAW: ${{ github.event.inputs.theme }}
+          WANT: ${{ github.event.inputs.videos_count }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: |
-          for keyword in $(echo "$THEME" | tr ',' ' '); do
-            echo "Téléchargement de vidéos pour: $keyword"
-            for i in $(seq 1 20); do
-              URL=$(curl -s "https://pixabay.com/api/videos/?key=$PIXABAY_API_KEY&q=$keyword&per_page=1&page=$i" \
-                | jq -r '.hits[0].videos.medium.url')
-              if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-                wget -q -O "media_bank/videos/${keyword}_${i}.mp4" "$URL"
+          set -euo pipefail
+
+          if [ -z "${PIXABAY_API_KEY:-}" ]; then
+            echo "WARN: PIXABAY_API_KEY manquant — on saute Pixabay videos."
+            exit 0
+          fi
+
+          mapfile -t THEMES < <(printf '%s\n' "$THEMES_RAW" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | awk 'NF')
+          encode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
+
+          saved=0
+          target="${WANT}"
+
+          for t in "${THEMES[@]}"; do
+            [ "$saved" -ge "$target" ] && break
+            qt=$(encode "$t")
+            page=1
+            per_page=30
+            while [ "$saved" -lt "$target" ] && [ "$page" -le 10 ]; do
+              resp_json=$(curl -sS "https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${qt}&per_page=${per_page}&page=${page}") || resp_json="{}"
+              count=$(printf '%s' "$resp_json" | jq '.hits | length' 2>/dev/null || echo 0)
+              if [ "$count" -eq 0 ]; then
+                echo "Pixabay: aucun résultat pour '$t' page $page"
+                page=$((page+1))
+                continue
               fi
+
+              for idx in $(seq 0 $((count-1))); do
+                [ "$saved" -ge "$target" ] && break
+                # On prend la meilleure URL dispo (ordre: 1080p, 720p, 480p)
+                url=$(printf '%s' "$resp_json" | jq -r ".hits[$idx].videos.full.url // .hits[$idx].videos.large.url // .hits[$idx].videos.medium.url // .hits[$idx].videos.small.url // empty")
+                if [ -n "$url" ]; then
+                  out="media_bank/videos/pixabay_${t// /_}_${page}_${idx}.mp4"
+                  if curl -sSL --fail -o "$out" "$url"; then
+                    echo "Vidéo enregistrée: $out"
+                    saved=$((saved+1))
+                  else
+                    echo "WARN: échec téléchargement (Pixabay) → $url"
+                    rm -f "$out" || true
+                  fi
+                fi
+              done
+              page=$((page+1))
             done
           done
 
-      # =============================
-      # UPLOAD
-      # =============================
+          echo "Total vidéos Pixabay: $saved"
+
+      - name: Résumé contenu
+        run: |
+          set -euo pipefail
+          echo "Images:"
+          ls -1 media_bank/images | wc -l || true
+          echo "Vidéos:"
+          ls -1 media_bank/videos | wc -l || true
+          # quelques fichiers listés
+          echo "--- Exemples images ---"
+          ls -1 media_bank/images | head -n 5 || true
+          echo "--- Exemples vidéos ---"
+          ls -1 media_bank/videos | head -n 5 || true
+
       - name: Upload media bank artifact
         uses: actions/upload-artifact@v4
         with:
