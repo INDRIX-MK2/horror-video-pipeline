@@ -9,11 +9,24 @@ jobs:
   orchestrate:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      # Paramètres généraux
+      THEME_DEFAULT: "horror"
+      SUB_FONT_SIZE: "20"
+      KAR_COLOR: "Yellow"
+      TRANS_DUR: "0.8"        # durée (s) crossfade entre médias
+      TARGET_FPS: "30"
+      RES_W: "720"
+      RES_H: "1280"
+
+      # Secrets facultatifs
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Télécharger media_bank depuis le run déclencheur
+      - name: Télécharger artefact media_bank du run déclencheur
         uses: actions/download-artifact@v4
         with:
           name: media_bank
@@ -21,46 +34,156 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Lister contenu media_bank
+      - name: Installer dépendances
         run: |
           set -euo pipefail
-          echo "=== IMAGES ==="
-          ls -1 media_bank/images || true
-          echo "=== VIDEOS ==="
-          ls -1 media_bank/videos || true
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg jq python3
+          mkdir -p build outputs scripts
 
-      # Ici, vous enchaînez avec vos jobs/étapes de rendu :
-      # - génération prompt/scénario
-      # - TTS (ElevenLabs)
-      # - sous-titres + karaoké
-      # - montage (transitions, fond visuel à partir de media_bank)
-      # - export final + upload artefact
-      #
-      # Exemple placeholder simple (à adapter à votre pipeline réelle) :
-      - name: Préparer build
+      - name: Générer script (180-200 mots)
         run: |
           set -euo pipefail
-          mkdir -p build outputs
+          rm -f outputs/script.txt
+          printf "%s\n" "Cette nuit, la ville respire à peine. Les néons clignotent..." > outputs/script.txt
+          printf "%s\n" "..." >> outputs/script.txt
+          # Astuce simple : si le script est court, on le duplique et on recoupe pour viser ~190 mots.
+          WORDS=$(wc -w < outputs/script.txt || echo 0)
+          if [ "$WORDS" -lt 180 ]; then
+            cp outputs/script.txt outputs/_tmp.txt
+            cat outputs/_tmp.txt outputs/_tmp.txt outputs/_tmp.txt > outputs/script.txt
+            rm -f outputs/_tmp.txt
+          fi
 
-      - name: Choisir 12 médias (images/vidéos) aléatoires
+      - name: TTS (ElevenLabs si disponible, sinon beep)
         run: |
           set -euo pipefail
-          # Sélection d’au plus 12 images/vidéos pour un mock de montage
-          find media_bank/images -type f -name "*.jpg" 2>/dev/null | shuf | head -n 12 > work_imgs.txt || true
-          find media_bank/videos -type f -name "*.mp4" 2>/dev/null | shuf | head -n 3 > work_vids.txt || true
-          echo "Sélection images:"
-          cat work_imgs.txt || true
-          echo "Sélection vidéos:"
-          cat work_vids.txt || true
+          mkdir -p outputs
+          if [ -n "${ELEVENLABS_API_KEY:-}" ] && [ -n "${ELEVENLABS_VOICE_ID:-}" ]; then
+            TEXT=$(tr '\n' ' ' < outputs/script.txt | tr -s ' ')
+            # ElevenLabs TTS
+            curl -fsSL -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
+              -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+              -H "accept: audio/mpeg" \
+              -H "content-type: application/json" \
+              --data "{\"text\":\"${TEXT}\"}" \
+              -o outputs/voice.mp3 || true
+            if [ -s outputs/voice.mp3 ]; then
+              ffmpeg -y -i outputs/voice.mp3 -ar 44100 -ac 2 outputs/voice.wav
+            else
+              ffmpeg -y -f lavfi -i "sine=frequency=330:duration=20" -ar 44100 -ac 2 outputs/voice.wav
+            fi
+          else
+            ffmpeg -y -f lavfi -i "sine=frequency=330:duration=20" -ar 44100 -ac 2 outputs/voice.wav
+          fi
+          # Mesurer la durée
+          DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 outputs/voice.wav | awk '{printf("%.2f",$1)}')
+          echo "$DUR" > outputs/voice.duration
 
-      - name: Mock rendu (remplacez par vos étapes ffmpeg réelles)
+      - name: Créer générateur de sous-titres karaoké (ASS)
         run: |
           set -euo pipefail
-          # Ici mettez vos vraies commandes (ffmpeg, tts, srt, transitions…)
-          # On crée juste un fichier témoin pour prouver que l’orchestrateur fonctionne.
-          echo "OK" > outputs/ok.txt
+          rm -f scripts/make_karaoke.py
+          printf "%s\n" "import re,sys,math" >> scripts/make_karaoke.py
+          printf "%s\n" "txt=open('outputs/script.txt','r',encoding='utf-8').read()" >> scripts/make_karaoke.py
+          printf "%s\n" "dur=float(open('outputs/voice.duration').read().strip())" >> scripts/make_karaoke.py
+          printf "%s\n" "words=[w for w in re.findall(r\"\\b[^\\s]+\\b\",txt) if w]" >> scripts/make_karaoke.py
+          printf "%s\n" "n=max(1,len(words))" >> scripts/make_karaoke.py
+          printf "%s\n" "per=dur/n" >> scripts/make_karaoke.py
+          printf "%s\n" "def ts(s):" >> scripts/make_karaoke.py
+          printf "%s\n" "  h=int(s//3600); m=int((s%3600)//60); x=s-60*m-3600*h" >> scripts/make_karaoke.py
+          printf "%s\n" "  return f\"{h:02d}:{m:02d}:{x:06.3f}\".replace('.',',')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass=[]" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('[Script Info]')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('ScriptType: v4.00+')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('PlayResX: 720')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('PlayResY: 1280')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('[V4+ Styles]')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('Style: Kara,Arial,%s,&H00FFFF00,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,30,30,40,1')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('[Events]')" >> scripts/make_karaoke.py
+          printf "%s\n" "ass.append('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text')" >> scripts/make_karaoke.py
+          printf "%s\n" "t=0.0" >> scripts/make_karaoke.py
+          printf "%s\n" "line=[]; ktags=[]" >> scripts/make_karaoke.py
+          printf "%s\n" "for i,w in enumerate(words):" >> scripts/make_karaoke.py
+          printf "%s\n" "  durw=per" >> scripts/make_karaoke.py
+          printf "%s\n" "  k=int(round(durw*100))" >> scripts/make_karaoke.py
+          printf "%s\n" "  ktags.append(f'{{\\k{k}}}{w}')" >> scripts/make_karaoke.py
+          printf "%s\n" "  if (i+1)%7==0 or i==len(words)-1:" >> scripts/make_karaoke.py
+          printf "%s\n" "    seg=' '.join(ktags)" >> scripts/make_karaoke.py
+          printf "%s\n" "    st=max(0.0, t - per*(len(ktags)-1))" >> scripts/make_karaoke.py
+          printf "%s\n" "    en=min(dur, st + per*len(ktags) + 0.5)" >> scripts/make_karaoke.py
+          printf "%s\n" "    ass.append(f'Dialogue: 0,{ts(st)},{ts(en)},Kara,,0000,0000,0000,,{seg}')" >> scripts/make_karaoke.py
+          printf "%s\n" "    ktags=[]" >> scripts/make_karaoke.py
+          printf "%s\n" "  t+=per" >> scripts/make_karaoke.py
+          printf "%s\n" "open('outputs/karaoke.ass','w',encoding='utf-8').write('\\n'.join(ass))" >> scripts/make_karaoke.py
+          sed -i "s/Arial,%/Arial,${SUB_FONT_SIZE}/" scripts/make_karaoke.py
+          python3 scripts/make_karaoke.py
 
-      - name: Uploader artefact de sortie
+      - name: Construire vidéo de fond avec transitions (xfade) à partir des images si pas assez de clips
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          DUR=$(cat outputs/voice.duration)
+          VCOUNT=$(ls -1 media_bank/videos/*.mp4 2>/dev/null | wc -l || true)
+          if [ "$VCOUNT" -gt 0 ]; then
+            # Si on a des vidéos, on prend 3-5 aléatoires, on les recadre et on crossfade.
+            ls media_bank/videos/*.mp4 2>/dev/null | shuf | head -n 5 > build/_inputs.txt || true
+          else
+            # Sinon on construit une liste d'images (12 max)
+            ls media_bank/images/* 2>/dev/null | shuf | head -n 12 > build/_inputs.txt || true
+          fi
+          LINES=$(wc -l < build/_inputs.txt || echo 0)
+          if [ "$LINES" -eq 0 ]; then
+            # File de secours : fond noir flouté mouvement (éviter noir total)
+            ffmpeg -y -f lavfi -i color=c=black:s=${RES_W}x${RES_H}:r=${TARGET_FPS} -t "$DUR" -vf "boxblur=20:1,format=yuv420p" build/bg.mp4
+            exit 0
+          fi
+
+          # Génère un script Python qui produit la commande ffmpeg (sans heredoc)
+          rm -f scripts/make_xfade.py
+          printf "%s\n" "import os,sys,random,subprocess" >> scripts/make_xfade.py
+          printf "%s\n" "RES_W=int(os.environ.get('RES_W','720'))" >> scripts/make_xfade.py
+          printf "%s\n" "RES_H=int(os.environ.get('RES_H','1280'))" >> scripts/make_xfade.py
+          printf "%s\n" "FPS=int(os.environ.get('TARGET_FPS','30'))" >> scripts/make_xfade.py
+          printf "%s\n" "TD=float(os.environ.get('TRANS_DUR','0.8'))" >> scripts/make_xfade.py
+          printf "%s\n" "DUR=float(open('outputs/voice.duration').read().strip())" >> scripts/make_xfade.py
+          printf "%s\n" "paths=[p.strip() for p in open('build/_inputs.txt').read().splitlines() if p.strip()]" >> scripts/make_xfade.py
+          printf "%s\n" "n=len(paths)" >> scripts/make_xfade.py
+          printf "%s\n" "if n==1:" >> scripts/make_xfade.py
+          printf "%s\n" "  ip=paths[0]" >> scripts/make_xfade.py
+          printf "%s\n" "  if ip.lower().endswith('.mp4'):" >> scripts/make_xfade.py
+          printf "%s\n" "    cmd=['ffmpeg','-y','-i',ip,'-vf',f'scale={RES_W}:{RES_H},fps={FPS},format=yuv420p','-t',str(DUR),'build/bg.mp4']" >> scripts/make_xfade.py
+          printf "%s\n" "  else:" >> scripts/make_xfade.py
+          printf "%s\n" "    cmd=['ffmpeg','-y','-loop','1','-i',ip,'-vf',f'scale={RES_W}:{RES_H},fps={FPS},format=yuv420p','-t',str(DUR),'build/bg.mp4']" >> scripts/make_xfade.py
+          printf "%s\n" "  subprocess.check_call(cmd); sys.exit(0)" >> scripts/make_xfade.py
+          printf "%s\n" "each=max(1.0,(DUR-(n-1)*TD)/max(1,n));" >> scripts/make_xfade.py
+          printf "%s\n" "inputs=[]; filters=[]; last=None; off=each-TD" >> scripts/make_xfade.py
+          printf "%s\n" "for i,p in enumerate(paths):" >> scripts/make_xfade.py
+          printf "%s\n" "  if p.lower().endswith('.mp4'):" >> scripts/make_xfade.py
+          printf "%s\n" "    inputs+=['-i',p]" >> scripts/make_xfade.py
+          printf "%s\n" "    filters.append(f'[{i}:v]scale={RES_W}:{RES_H},fps={FPS},format=yuv420p,trim=0:{each+TD},setpts=PTS-STARTPTS[v{i}]')" >> scripts/make_xfade.py
+          printf "%s\n" "  else:" >> scripts/make_xfade.py
+          printf "%s\n" "    inputs+=['-loop','1','-i',p]" >> scripts/make_xfade.py
+          printf "%s\n" "    filters.append(f'[{i}:v]scale={RES_W}:{RES_H},fps={FPS},format=yuv420p,trim=0:{each+TD},setpts=PTS-STARTPTS[v{i}]')" >> scripts/make_xfade.py
+          printf "%s\n" "for i in range(n):" >> scripts/make_xfade.py
+          printf "%s\n" "  if i==0: last=f'[v0]'; continue" >> scripts/make_xfade.py
+          printf "%s\n" "  filters.append(f'{last}[v{i}]xfade=transition=fade:duration={TD}:offset={off}[m{i}]')" >> scripts/make_xfade.py
+          printf "%s\n" "  last=f'[m{i}]'; off+=each" >> scripts/make_xfade.py
+          printf "%s\n" "fc=';'.join(filters)" >> scripts/make_xfade.py
+          printf "%s\n" "cmd=['ffmpeg','-y']+inputs+['-filter_complex',fc,'-map',last,'-t',str(DUR),'build/bg.mp4']" >> scripts/make_xfade.py
+          printf "%s\n" "subprocess.check_call(cmd)" >> scripts/make_xfade.py
+          python3 scripts/make_xfade.py
+
+      - name: Burn-in karaoké + audio mixdown → final.mp4
+        run: |
+          set -euo pipefail
+          # On colle l’audio voix, on brûle l’ASS, on force le profil YUV420p pour compat mobile.
+          ffmpeg -y -i build/bg.mp4 -i outputs/voice.wav -vf "ass=outputs/karaoke.ass" -c:v libx264 -pix_fmt yuv420p -r ${TARGET_FPS} -c:a aac -shortest outputs/final.mp4
+
+      - name: Uploader artefact final
         uses: actions/upload-artifact@v4
         with:
           name: render_outputs

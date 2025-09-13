@@ -38,16 +38,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p media_bank/images media_bank/videos work
-          echo "theme=${THEME}" > work/params.txt
-          echo "providers=${PROVIDERS}" >> work/params.txt
-          echo "max_images=${MAX_IMAGES}" >> work/params.txt
-          echo "max_videos=${MAX_VIDEOS}" >> work/params.txt
+          printf "theme=%s\n" "${THEME}" > work/params.txt
+          printf "providers=%s\n" "${PROVIDERS}" >> work/params.txt
+          printf "max_images=%s\n" "${MAX_IMAGES}" >> work/params.txt
+          printf "max_videos=%s\n" "${MAX_VIDEOS}" >> work/params.txt
 
-      - name: Installer jq & curl
+      - name: Installer jq
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq curl
 
       - name: Télécharger images (Pexels)
         if: contains(env.PROVIDERS, 'pexels')
@@ -55,28 +55,21 @@ jobs:
           KEY: ${{ env.PEXELS_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${KEY:-}" ]; then
-            echo "Clé Pexels absente: skip."
-            exit 0
-          fi
+          if [ -z "${KEY:-}" ]; then echo "Clé Pexels absente, skip."; exit 0; fi
           THEMES=$(echo "$THEME" | tr ',' ' ')
           COUNT=0
-          MAX=$(( MAX_IMAGES / 2 ))
-          if [ $MAX -lt 1 ]; then MAX=1; fi
           for kw in $THEMES; do
-            if [ $COUNT -ge $MAX_IMAGES ]; then break; fi
-            echo "Téléchargement d'images Pexels pour: $kw"
-            # On demande 20 par page, on boucle sur 1..5 jusqu'à atteindre MAX (limite simple)
+            [ $COUNT -ge "$MAX_IMAGES" ] && break
             for page in 1 2 3 4 5; do
-              if [ $COUNT -ge $MAX_IMAGES ]; then break; fi
+              [ $COUNT -ge "$MAX_IMAGES" ] && break
               url="https://api.pexels.com/v1/search?query=${kw}&per_page=20&page=${page}"
               json=$(curl -fsSL -H "Authorization: $KEY" "$url" || true)
               echo "$json" | jq -r '.photos[].src.original' | while read -r u; do
-                if [ -n "$u" ] && [ $COUNT -lt $MAX_IMAGES ]; then
-                  fn="media_bank/images/pexels_${kw}_${COUNT}.jpg"
-                  curl -fsSL "$u" -o "$fn" || true
-                  if [ -s "$fn" ]; then COUNT=$((COUNT+1)); fi
-                fi
+                [ $COUNT -ge "$MAX_IMAGES" ] && break
+                [ -n "$u" ] || continue
+                fn="media_bank/images/pexels_${kw}_${COUNT}.jpg"
+                curl -fsSL "$u" -o "$fn" || true
+                if [ -s "$fn" ]; then COUNT=$((COUNT+1)); fi
               done
             done
           done
@@ -88,31 +81,24 @@ jobs:
           KEY: ${{ env.PIXABAY_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${KEY:-}" ]; then
-            echo "Clé Pixabay absente: skip."
-            exit 0
-          fi
+          if [ -z "${KEY:-}" ]; then echo "Clé Pixabay absente, skip."; exit 0; fi
           THEMES=$(echo "$THEME" | tr ',' ' ')
           CUR=$(ls -1 media_bank/images 2>/dev/null | wc -l || true)
           REM=$(( MAX_IMAGES - CUR ))
-          if [ $REM -le 0 ]; then
-            echo "Quota images déjà atteint: $CUR"
-            exit 0
-          fi
+          [ $REM -le 0 ] && { echo "Quota images atteint: $CUR"; exit 0; }
           for kw in $THEMES; do
-            if [ $REM -le 0 ]; then break; fi
-            echo "Téléchargement d'images Pixabay pour: $kw"
+            [ $REM -le 0 ] && break
             for page in 1 2 3 4 5; do
-              if [ $REM -le 0 ]; then break; fi
+              [ $REM -le 0 ] && break
               url="https://pixabay.com/api/?key=${KEY}&q=${kw}&image_type=photo&per_page=20&page=${page}"
               json=$(curl -fsSL "$url" || true)
               echo "$json" | jq -r '.hits[].largeImageURL' | while read -r u; do
-                if [ -n "$u" ] && [ $REM -gt 0 ]; then
-                  idx=$(ls -1 media_bank/images 2>/dev/null | wc -l || true)
-                  fn="media_bank/images/pixabay_${kw}_${idx}.jpg"
-                  curl -fsSL "$u" -o "$fn" || true
-                  if [ -s "$fn" ]; then REM=$((REM-1)); fi
-                fi
+                [ $REM -le 0 ] && break
+                [ -n "$u" ] || continue
+                idx=$(ls -1 media_bank/images 2>/dev/null | wc -l || true)
+                fn="media_bank/images/pixabay_${kw}_${idx}.jpg"
+                curl -fsSL "$u" -o "$fn" || true
+                if [ -s "$fn" ]; then REM=$((REM-1)); fi
               done
             done
           done
@@ -124,32 +110,27 @@ jobs:
           KEY: ${{ env.PEXELS_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${KEY:-}" ]; then
-            echo "Clé Pexels absente: skip vidéos."
-            exit 0
-          fi
+          if [ -z "${KEY:-}" ]; then echo "Clé Pexels absente (vidéos), skip."; exit 0; fi
           THEMES=$(echo "$THEME" | tr ',' ' ')
           COUNT=0
           for kw in $THEMES; do
-            if [ $COUNT -ge $MAX_VIDEOS ]; then break; fi
-            echo "Téléchargement de mini-clips Pexels pour: $kw"
+            [ $COUNT -ge "$MAX_VIDEOS" ] && break
             for page in 1 2 3 4 5; do
-              if [ $COUNT -ge $MAX_VIDEOS ]; then break; fi
+              [ $COUNT -ge "$MAX_VIDEOS" ] && break
               url="https://api.pexels.com/videos/search?query=${kw}&per_page=15&page=${page}"
               json=$(curl -fsSL -H "Authorization: $KEY" "$url" || true)
-              # On prend la plus petite version (première video_files) pour limiter la taille
               echo "$json" | jq -r '.videos[].video_files[0].link' | while read -r u; do
-                if [ -n "$u" ] && [ $COUNT -lt $MAX_VIDEOS ]; then
-                  fn="media_bank/videos/pexels_${kw}_${COUNT}.mp4"
-                  curl -fsSL "$u" -o "$fn" || true
-                  if [ -s "$fn" ]; then COUNT=$((COUNT+1)); fi
-                fi
+                [ $COUNT -ge "$MAX_VIDEOS" ] && break
+                [ -n "$u" ] || continue
+                fn="media_bank/videos/pexels_${kw}_${COUNT}.mp4"
+                curl -fsSL "$u" -o "$fn" || true
+                if [ -s "$fn" ]; then COUNT=$((COUNT+1)); fi
               done
             done
           done
           echo "Total vidéos Pexels: $COUNT"
 
-      - name: Vérifier contenu et uploader artefact
+      - name: Uploader artefact media_bank
         uses: actions/upload-artifact@v4
         with:
           name: media_bank
