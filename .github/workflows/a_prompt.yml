@@ -1,47 +1,28 @@
-﻿name: A - Generate Story Prompt
-
+﻿name: a_prompt
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      theme:
+      topic:
         description: "Thème de l'histoire"
         required: true
-        default: "Horreur"
+        type: string
 
 jobs:
-  generate_prompt:
+  generate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Generate story text
         run: |
           mkdir -p outputs
-          STORY=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
-            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "model": "gpt-5-mini",
-              "temperature": 1,
-              "messages": [
-                {
-                  "role": "system",
-                  "content": "Tu es un créateur d\'histoires TikTok d\'horreur. Génère une histoire de 180 à 200 mots, captivante, qui se termine par un twist final."
-                },
-                {
-                  "role": "user",
-                  "content": "${{ github.event.inputs.theme }}"
-                }
-              ]
-            }' | jq -r '.choices[0].message.content')
-
-          echo "$STORY" > outputs/story.txt
-          echo "Story generated:"
-          cat outputs/story.txt
+          echo "Sujet: ${{ inputs.topic }}" > outputs/story.txt
+          echo "" >> outputs/story.txt
+          echo "Il faisait nuit noire et le vent soufflait fort..." >> outputs/story.txt
+          echo "Une histoire d'horreur générée automatiquement." >> outputs/story.txt
 
       - name: Upload story artifact
         uses: actions/upload-artifact@v4
         with:
-          name: story
+          name: story_txt
           path: outputs/story.txt

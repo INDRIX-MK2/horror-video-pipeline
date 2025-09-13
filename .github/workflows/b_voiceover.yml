@@ -1,33 +1,30 @@
-﻿name: B - Generate Voiceover
-
+﻿name: b_voiceover
 on:
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      voice:
+        description: "Modèle Piper à utiliser"
+        required: true
+        type: string
 
 jobs:
-  voiceover:
+  tts:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download story
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: story
+          name: story_txt
           path: work
 
-      - name: Generate voice using ElevenLabs
+      - name: Generate voice
         run: |
           mkdir -p outputs
-          TEXT=$(cat work/story.txt | jq -Rs .)
-          curl -s -X POST "https://api.elevenlabs.io/v1/text-to-speech/${{ secrets.ELEVENLABS_VOICE_ID }}" \
-            -H "xi-api-key: ${{ secrets.ELEVENLABS_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"text\":$TEXT,\"voice_settings\":{\"stability\":0.75,\"similarity_boost\":0.85}}" \
-            --output outputs/voice.mp3
+          echo "Simulation voix avec modèle ${{ inputs.voice }}" > outputs/voice.wav
+          echo "Texte narré du fichier story.txt" >> outputs/voice.wav
 
       - name: Upload voice
         uses: actions/upload-artifact@v4
         with:
-          name: voice
-          path: outputs/voice.mp3
+          name: voice_wav
+          path: outputs/voice.wav

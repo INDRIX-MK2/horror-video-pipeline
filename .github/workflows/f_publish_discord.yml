@@ -1,20 +1,25 @@
-﻿name: F - Publish to Discord
-
+﻿name: f_publish_discord
 on:
-  workflow_dispatch:
+  workflow_call:
 
 jobs:
-  publish_discord:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Download final video
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: final_video
+          name: final_mp4
           path: work
 
       - name: Send to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          curl -F "payload_json={\"content\": \"Nouvelle vidéo générée !\"}" \
-               -F "file=@work/final.mp4" \
-               ${{ secrets.DISCORD_WEBHOOK_URL }}
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Le secret DISCORD_WEBHOOK_URL est manquant."
+            exit 0
+          fi
+          curl -sS -X POST \
+            -F "payload_json={\"content\":\"🎥 Nouvelle vidéo générée automatiquement !\"}" \
+            -F "files[0]=@work/final.mp4" \
+            "$DISCORD_WEBHOOK_URL"

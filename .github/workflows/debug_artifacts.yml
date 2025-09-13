@@ -1,16 +1,41 @@
-﻿name: Z - Debug Artifacts
-
+﻿name: debug_artifacts
 on:
   workflow_dispatch:
 
 jobs:
-  debug_artifacts:
+  debug:
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: debug
+          name: story_txt
+          path: fetched
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: voice_wav
+          path: fetched
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: images_zip
+          path: fetched
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: captions_srt
+          path: fetched
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: final_mp4
+          path: fetched
+        continue-on-error: true
 
-      - name: List debug contents
-        run: ls -R debug
+      - name: Tree
+        run: ls -R fetched || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug_bundle
+          path: fetched

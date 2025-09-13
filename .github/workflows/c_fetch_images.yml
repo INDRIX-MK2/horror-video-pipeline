@@ -1,35 +1,22 @@
-﻿name: C - Fetch Media For Video
-
+﻿name: c_fetch_images
 on:
-  workflow_dispatch:
-    inputs:
-      count:
-        description: "Nombre d'éléments à sélectionner"
-        required: true
-        default: "12"
+  workflow_call:
 
 jobs:
-  fetch_media:
+  images:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download media bank artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: media_bank
-          path: media_bank
-
-      - name: Select random media
+      - name: Generate placeholder images
         run: |
           mkdir -p outputs/images
-          mkdir -p outputs/videos
-          shuf -n ${{ github.event.inputs.count }} -e media_bank/images/* | xargs -I{} cp {} outputs/images/
-          shuf -n ${{ github.event.inputs.count }} -e media_bank/videos/* | xargs -I{} cp {} outputs/videos/
+          for i in {1..5}; do
+            echo "Image $i" > outputs/images/img_$i.png
+          done
+          zip -r outputs/images.zip outputs/images
 
-      - name: Upload selected media
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: selected_media
-          path: outputs
+          name: images_zip
+          path: outputs/images.zip

@@ -1,38 +1,29 @@
-﻿name: G - Generate Subtitles
-
+﻿name: d_generate_subtitles
 on:
-  workflow_dispatch:
+  workflow_call:
 
 jobs:
-  generate_subtitles:
+  subtitles:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download story
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: story
+          name: story_txt
           path: work
 
       - name: Generate subtitles
         run: |
           mkdir -p outputs
-          # SRT simple
-          awk 'BEGIN{print "1\n00:00:00,000 --> 00:00:20,000"}{print}' work/story.txt > outputs/captions.srt
-          # ASS pour karaoké
-          echo "[Script Info]" > outputs/captions.ass
-          echo "ScriptType: v4.00+" >> outputs/captions.ass
-          echo "[V4+ Styles]" >> outputs/captions.ass
-          echo "Format: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding" >> outputs/captions.ass
-          echo "Style: Default,DejaVu Sans,20,&H00FFFF00,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,0" >> outputs/captions.ass
-          echo "[Events]" >> outputs/captions.ass
-          echo "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text" >> outputs/captions.ass
-          echo "Dialogue: 0,0:00:00.00,0:00:20.00,Default,,0,0,0,karaoke,{\k20}$(cat work/story.txt)" >> outputs/captions.ass
+          echo "1" > outputs/captions.srt
+          echo "00:00:00,000 --> 00:00:05,000" >> outputs/captions.srt
+          echo "Ceci est un sous-titre test." >> outputs/captions.srt
+          echo "" >> outputs/captions.srt
+          echo "2" >> outputs/captions.srt
+          echo "00:00:05,001 --> 00:00:10,000" >> outputs/captions.srt
+          echo "Deuxième sous-titre de test." >> outputs/captions.srt
 
-      - name: Upload subtitles
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: subtitles
-          path: outputs
+          name: captions_srt
+          path: outputs/captions.srt
