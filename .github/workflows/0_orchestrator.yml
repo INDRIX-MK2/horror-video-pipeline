@@ -1,140 +1,68 @@
-﻿name: orchestrator
+﻿name: 0_orchestrator
 
 on:
-  workflow_dispatch:
-    inputs:
-      theme:
-        description: "Thème (mots-clés séparés par des virgules)"
-        required: true
-        default: "horror, dark alley, haunted house"
-      use_mediabank:
-        description: "Utiliser l'artifact media_bank (true/false)"
-        required: true
-        default: "true"
-      target_duration_s:
-        description: "Durée cible (s) — sert à répartir les images"
-        required: true
-        default: "60"
+  workflow_run:
+    workflows: ["g_build_mediabank"]
+    types: [completed]
 
 jobs:
-  render_orchestrated:
+  orchestrate:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Tools
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq ffmpeg wget unzip
-
-      - name: Prepare folders
-        run: |
-          set -euo pipefail
-          mkdir -p work build outputs
-          mkdir -p work/images work/videos
-
-      - name: Download media bank (if requested)
-        if: ${{ github.event.inputs.use_mediabank == 'true' }}
+      - name: Télécharger media_bank depuis le run déclencheur
         uses: actions/download-artifact@v4
         with:
           name: media_bank
-          path: work
+          path: media_bank
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Select up to 12 assets (videos+images)
+      - name: Lister contenu media_bank
         run: |
           set -euo pipefail
-          IM_DIR="work/media_bank/images"
-          VI_DIR="work/media_bank/videos"
-          mkdir -p "$IM_DIR" "$VI_DIR"
+          echo "=== IMAGES ==="
+          ls -1 media_bank/images || true
+          echo "=== VIDEOS ==="
+          ls -1 media_bank/videos || true
 
-          find "$VI_DIR" -type f -name "*.mp4" | sort > work/_all_videos.txt || true
-          find "$IM_DIR" -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" \) | sort > work/_all_images.txt || true
-
-          head -n 12 work/_all_videos.txt > work/_take_videos.txt || true
-          VCOUNT=$(wc -l < work/_take_videos.txt || echo 0)
-          RESTE=$((12 - VCOUNT))
-          if [ "$RESTE" -gt 0 ]; then
-            head -n "$RESTE" work/_all_images.txt > work/_take_images.txt || true
-          else
-            true > work/_take_images.txt
-          fi
-
-          # vide/initialise le fichier sélection
-          true > work/_selected.txt
-          cat work/_take_videos.txt >> work/_selected.txt
-          cat work/_take_images.txt >> work/_selected.txt
-
-          n=1
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            bn=$(printf "%04d" "$n")
-            ext="${f##*.}"
-            out="build/${bn}.${ext}"
-            cp -f "$f" "$out"
-            n=$((n+1))
-          done < work/_selected.txt
-
-          ls -l build || true
-
-      - name: Normalize images to PNG 720x1280
+      # Ici, vous enchaînez avec vos jobs/étapes de rendu :
+      # - génération prompt/scénario
+      # - TTS (ElevenLabs)
+      # - sous-titres + karaoké
+      # - montage (transitions, fond visuel à partir de media_bank)
+      # - export final + upload artefact
+      #
+      # Exemple placeholder simple (à adapter à votre pipeline réelle) :
+      - name: Préparer build
         run: |
           set -euo pipefail
-          for src in build/*; do
-            [ -e "$src" ] || continue
-            case "${src##*.}" in
-              jpg|jpeg|png|JPG|JPEG|PNG)
-                base="${src%.*}"
-                ffmpeg -y -loglevel error -i "$src" -vf "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2" "build/${base##*/}.png"
-                ;;
-              mp4|MP4)
-                :
-                ;;
-              *)
-                :
-                ;;
-            esac
-          done
+          mkdir -p build outputs
 
-      - name: Compute per-image duration and create filelist
-        env:
-          TARGET: ${{ github.event.inputs.target_duration_s }}
+      - name: Choisir 12 médias (images/vidéos) aléatoires
         run: |
           set -euo pipefail
-          N=$(ls build/*.png 2>/dev/null | wc -l || true)
-          if [ "$N" -eq 0 ]; then
-            echo "Aucune image PNG dans build/. Assure-toi que la MediaBank contient des images." >&2
-            exit 1
-          fi
+          # Sélection d’au plus 12 images/vidéos pour un mock de montage
+          find media_bank/images -type f -name "*.jpg" 2>/dev/null | shuf | head -n 12 > work_imgs.txt || true
+          find media_bank/videos -type f -name "*.mp4" 2>/dev/null | shuf | head -n 3 > work_vids.txt || true
+          echo "Sélection images:"
+          cat work_imgs.txt || true
+          echo "Sélection vidéos:"
+          cat work_vids.txt || true
 
-          PER=$(awk -v t="$TARGET" -v n="$N" 'BEGIN { if (n>0) printf("%.2f", t/n); else printf("5.00"); }')
-          echo "Durée par image = $PER s (N=$N, cible=$TARGET s)"
-
-          FILELIST="build/filelist.txt"
-          true > "$FILELIST"
-          for img in $(ls build/*.png | sort); do
-            printf "file '%s'\n" "$img" >> "$FILELIST"
-            printf "duration %s\n" "$PER" >> "$FILELIST"
-          done
-          LAST_IMG=$(ls build/*.png | sort | tail -n 1)
-          printf "file '%s'\n" "$LAST_IMG" >> "$FILELIST"
-
-          echo "=== filelist.txt ==="
-          cat "$FILELIST"
-
-      - name: Build slideshow (images only)
+      - name: Mock rendu (remplacez par vos étapes ffmpeg réelles)
         run: |
           set -euo pipefail
-          ffmpeg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t 1 -y -loglevel error outputs/silence.wav
-          ffmpeg -safe 0 -f concat -i build/filelist.txt -i outputs/silence.wav -shortest -r 25 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart -y work/slideshow.mp4
+          # Ici mettez vos vraies commandes (ffmpeg, tts, srt, transitions…)
+          # On crée juste un fichier témoin pour prouver que l’orchestrateur fonctionne.
+          echo "OK" > outputs/ok.txt
 
-      - name: Upload intermediate artifacts
+      - name: Uploader artefact de sortie
         uses: actions/upload-artifact@v4
         with:
-          name: orchestrator_outputs
-          path: |
-            build/filelist.txt
-            work/slideshow.mp4
-            outputs/silence.wav
+          name: render_outputs
+          path: outputs
+          if-no-files-found: error

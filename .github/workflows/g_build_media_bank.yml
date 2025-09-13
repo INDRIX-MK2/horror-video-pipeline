@@ -1,170 +1,157 @@
-name: build_mediabank
+name: g_build_mediabank
 
 on:
   workflow_dispatch:
     inputs:
       theme:
-        description: "Thème(s) séparés par des virgules (ex: horror, dark alley, haunted house)"
-        required: true
-        default: "horror, dark alley, haunted house"
-      images_count:
-        description: "Nombre d'images à récupérer (total, multi-thèmes confondus)"
-        required: true
+        description: "Thème(s), séparés par des virgules (ex: horror,shadow,night)"
+        required: false
+        default: "horror"
+      max_images:
+        description: "Nombre d'images à récupérer (total)"
+        required: false
         default: "100"
-      videos_count:
-        description: "Nombre de vidéos à récupérer (total, multi-thèmes confondus)"
-        required: true
+      max_videos:
+        description: "Nombre de mini-clips à récupérer (total)"
+        required: false
         default: "100"
+      providers:
+        description: "Sources (pexels,pixabay)"
+        required: false
+        default: "pexels,pixabay"
 
 jobs:
   build_mediabank:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    env:
+      THEME: ${{ github.event.inputs.theme }}
+      MAX_IMAGES: ${{ github.event.inputs.max_images }}
+      MAX_VIDEOS: ${{ github.event.inputs.max_videos }}
+      PROVIDERS: ${{ github.event.inputs.providers }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
 
-      - name: Tools
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Préparer dossiers
+        run: |
+          set -euo pipefail
+          mkdir -p media_bank/images media_bank/videos work
+          echo "theme=${THEME}" > work/params.txt
+          echo "providers=${PROVIDERS}" >> work/params.txt
+          echo "max_images=${MAX_IMAGES}" >> work/params.txt
+          echo "max_videos=${MAX_VIDEOS}" >> work/params.txt
+
+      - name: Installer jq & curl
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq curl wget
+          sudo apt-get install -y jq
 
-      - name: Create folders
-        run: |
-          set -euo pipefail
-          mkdir -p media_bank/images
-          mkdir -p media_bank/videos
-
-      - name: Download images from Pexels (robuste)
+      - name: Télécharger images (Pexels)
+        if: contains(env.PROVIDERS, 'pexels')
         env:
-          THEMES_RAW: ${{ github.event.inputs.theme }}
-          WANT: ${{ github.event.inputs.images_count }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          KEY: ${{ env.PEXELS_API_KEY }}
         run: |
           set -euo pipefail
-
-          if [ -z "${PEXELS_API_KEY:-}" ]; then
-            echo "WARN: PEXELS_API_KEY manquant — on saute Pexels images."
+          if [ -z "${KEY:-}" ]; then
+            echo "Clé Pexels absente: skip."
             exit 0
           fi
-
-          # Split des thèmes par virgule, trim, encodage URL
-          mapfile -t THEMES < <(printf '%s\n' "$THEMES_RAW" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | awk 'NF')
-          encode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
-
-          saved=0
-          target="${WANT}"
-
-          for t in "${THEMES[@]}"; do
-            [ "$saved" -ge "$target" ] && break
-            qt=$(encode "$t")
-            page=1
-            per_page=30
-            # boucle sur pages tant qu'on a besoin
-            while [ "$saved" -lt "$target" ] && [ "$page" -le 10 ]; do
-              # Appel API
-              resp_json=$(curl -sS -H "Authorization: ${PEXELS_API_KEY}" \
-                "https://api.pexels.com/v1/search?query=${qt}&per_page=${per_page}&page=${page}") || resp_json="{}"
-
-              # Vérifie qu'il y a au moins une photo
-              count=$(printf '%s' "$resp_json" | jq '.photos | length' 2>/dev/null || echo 0)
-              if [ "$count" -eq 0 ]; then
-                echo "Pexels: aucun résultat pour '$t' page $page"
-                page=$((page+1))
-                continue
-              fi
-
-              # Télécharge chaque URL originale si elle existe
-              for idx in $(seq 0 $((count-1))); do
-                [ "$saved" -ge "$target" ] && break
-                url=$(printf '%s' "$resp_json" | jq -r ".photos[$idx].src.original // empty")
-                if [ -n "$url" ]; then
-                  out="media_bank/images/pexels_${t// /_}_${page}_${idx}.jpg"
-                  # Utilise curl et ne casse pas le job si une URL échoue
-                  if curl -sSL --fail -o "$out" "$url"; then
-                    echo "Image enregistrée: $out"
-                    saved=$((saved+1))
-                  else
-                    echo "WARN: échec téléchargement (Pexels) → $url"
-                    rm -f "$out" || true
-                  fi
+          THEMES=$(echo "$THEME" | tr ',' ' ')
+          COUNT=0
+          MAX=$(( MAX_IMAGES / 2 ))
+          if [ $MAX -lt 1 ]; then MAX=1; fi
+          for kw in $THEMES; do
+            if [ $COUNT -ge $MAX_IMAGES ]; then break; fi
+            echo "Téléchargement d'images Pexels pour: $kw"
+            # On demande 20 par page, on boucle sur 1..5 jusqu'à atteindre MAX (limite simple)
+            for page in 1 2 3 4 5; do
+              if [ $COUNT -ge $MAX_IMAGES ]; then break; fi
+              url="https://api.pexels.com/v1/search?query=${kw}&per_page=20&page=${page}"
+              json=$(curl -fsSL -H "Authorization: $KEY" "$url" || true)
+              echo "$json" | jq -r '.photos[].src.original' | while read -r u; do
+                if [ -n "$u" ] && [ $COUNT -lt $MAX_IMAGES ]; then
+                  fn="media_bank/images/pexels_${kw}_${COUNT}.jpg"
+                  curl -fsSL "$u" -o "$fn" || true
+                  if [ -s "$fn" ]; then COUNT=$((COUNT+1)); fi
                 fi
               done
-              page=$((page+1))
             done
           done
+          echo "Total images Pexels: $COUNT"
 
-          echo "Total images Pexels: $saved"
-
-      - name: Download videos from Pixabay (robuste)
+      - name: Télécharger images (Pixabay)
+        if: contains(env.PROVIDERS, 'pixabay')
         env:
-          THEMES_RAW: ${{ github.event.inputs.theme }}
-          WANT: ${{ github.event.inputs.videos_count }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          KEY: ${{ env.PIXABAY_API_KEY }}
         run: |
           set -euo pipefail
-
-          if [ -z "${PIXABAY_API_KEY:-}" ]; then
-            echo "WARN: PIXABAY_API_KEY manquant — on saute Pixabay videos."
+          if [ -z "${KEY:-}" ]; then
+            echo "Clé Pixabay absente: skip."
             exit 0
           fi
-
-          mapfile -t THEMES < <(printf '%s\n' "$THEMES_RAW" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | awk 'NF')
-          encode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
-
-          saved=0
-          target="${WANT}"
-
-          for t in "${THEMES[@]}"; do
-            [ "$saved" -ge "$target" ] && break
-            qt=$(encode "$t")
-            page=1
-            per_page=30
-            while [ "$saved" -lt "$target" ] && [ "$page" -le 10 ]; do
-              resp_json=$(curl -sS "https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${qt}&per_page=${per_page}&page=${page}") || resp_json="{}"
-              count=$(printf '%s' "$resp_json" | jq '.hits | length' 2>/dev/null || echo 0)
-              if [ "$count" -eq 0 ]; then
-                echo "Pixabay: aucun résultat pour '$t' page $page"
-                page=$((page+1))
-                continue
-              fi
-
-              for idx in $(seq 0 $((count-1))); do
-                [ "$saved" -ge "$target" ] && break
-                # On prend la meilleure URL dispo (ordre: 1080p, 720p, 480p)
-                url=$(printf '%s' "$resp_json" | jq -r ".hits[$idx].videos.full.url // .hits[$idx].videos.large.url // .hits[$idx].videos.medium.url // .hits[$idx].videos.small.url // empty")
-                if [ -n "$url" ]; then
-                  out="media_bank/videos/pixabay_${t// /_}_${page}_${idx}.mp4"
-                  if curl -sSL --fail -o "$out" "$url"; then
-                    echo "Vidéo enregistrée: $out"
-                    saved=$((saved+1))
-                  else
-                    echo "WARN: échec téléchargement (Pixabay) → $url"
-                    rm -f "$out" || true
-                  fi
+          THEMES=$(echo "$THEME" | tr ',' ' ')
+          CUR=$(ls -1 media_bank/images 2>/dev/null | wc -l || true)
+          REM=$(( MAX_IMAGES - CUR ))
+          if [ $REM -le 0 ]; then
+            echo "Quota images déjà atteint: $CUR"
+            exit 0
+          fi
+          for kw in $THEMES; do
+            if [ $REM -le 0 ]; then break; fi
+            echo "Téléchargement d'images Pixabay pour: $kw"
+            for page in 1 2 3 4 5; do
+              if [ $REM -le 0 ]; then break; fi
+              url="https://pixabay.com/api/?key=${KEY}&q=${kw}&image_type=photo&per_page=20&page=${page}"
+              json=$(curl -fsSL "$url" || true)
+              echo "$json" | jq -r '.hits[].largeImageURL' | while read -r u; do
+                if [ -n "$u" ] && [ $REM -gt 0 ]; then
+                  idx=$(ls -1 media_bank/images 2>/dev/null | wc -l || true)
+                  fn="media_bank/images/pixabay_${kw}_${idx}.jpg"
+                  curl -fsSL "$u" -o "$fn" || true
+                  if [ -s "$fn" ]; then REM=$((REM-1)); fi
                 fi
               done
-              page=$((page+1))
             done
           done
+          echo "Total images: $(ls -1 media_bank/images 2>/dev/null | wc -l || true)"
 
-          echo "Total vidéos Pixabay: $saved"
-
-      - name: Résumé contenu
+      - name: Télécharger vidéos (Pexels)
+        if: contains(env.PROVIDERS, 'pexels')
+        env:
+          KEY: ${{ env.PEXELS_API_KEY }}
         run: |
           set -euo pipefail
-          echo "Images:"
-          ls -1 media_bank/images | wc -l || true
-          echo "Vidéos:"
-          ls -1 media_bank/videos | wc -l || true
-          # quelques fichiers listés
-          echo "--- Exemples images ---"
-          ls -1 media_bank/images | head -n 5 || true
-          echo "--- Exemples vidéos ---"
-          ls -1 media_bank/videos | head -n 5 || true
+          if [ -z "${KEY:-}" ]; then
+            echo "Clé Pexels absente: skip vidéos."
+            exit 0
+          fi
+          THEMES=$(echo "$THEME" | tr ',' ' ')
+          COUNT=0
+          for kw in $THEMES; do
+            if [ $COUNT -ge $MAX_VIDEOS ]; then break; fi
+            echo "Téléchargement de mini-clips Pexels pour: $kw"
+            for page in 1 2 3 4 5; do
+              if [ $COUNT -ge $MAX_VIDEOS ]; then break; fi
+              url="https://api.pexels.com/videos/search?query=${kw}&per_page=15&page=${page}"
+              json=$(curl -fsSL -H "Authorization: $KEY" "$url" || true)
+              # On prend la plus petite version (première video_files) pour limiter la taille
+              echo "$json" | jq -r '.videos[].video_files[0].link' | while read -r u; do
+                if [ -n "$u" ] && [ $COUNT -lt $MAX_VIDEOS ]; then
+                  fn="media_bank/videos/pexels_${kw}_${COUNT}.mp4"
+                  curl -fsSL "$u" -o "$fn" || true
+                  if [ -s "$fn" ]; then COUNT=$((COUNT+1)); fi
+                fi
+              done
+            done
+          done
+          echo "Total vidéos Pexels: $COUNT"
 
-      - name: Upload media bank artifact
+      - name: Vérifier contenu et uploader artefact
         uses: actions/upload-artifact@v4
         with:
           name: media_bank
           path: media_bank
+          if-no-files-found: error
