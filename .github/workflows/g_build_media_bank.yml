@@ -24,27 +24,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Télécharger images (dossier)
+        uses: actions/download-artifact@v4
+        with:
+          name: images_dir
+          path: outputs/images
+
       - uses: actions/download-artifact@v4
-        with: { name: images_zip, path: . }
+        with:
+          name: final_video_mp4
+          path: outputs
+
       - uses: actions/download-artifact@v4
-        with: { name: final_video_mp4, path: . }
+        with:
+          name: subtitles_srt
+          path: outputs
+
       - uses: actions/download-artifact@v4
-        with: { name: subtitles_srt, path: . }
+        with:
+          name: voice_mp3
+          path: outputs
+
       - uses: actions/download-artifact@v4
-        with: { name: voice_mp3, path: . }
-      - uses: actions/download-artifact@v4
-        with: { name: prompt_txt, path: . }
+        with:
+          name: prompt_txt
+          path: outputs
+
       - name: Packager bundle
         run: |
           mkdir -p bundle
-          cp outputs/images.zip            bundle/
+          cp -r outputs/images             bundle/images
           cp ${{ inputs.video_path }}      bundle/
           cp ${{ inputs.captions_path }}   bundle/
           cp ${{ inputs.voice_path }}      bundle/
           cp outputs/prompt.txt            bundle/
           printf "%s\n" "${{ inputs.query }}" > bundle/image_query.txt
           (cd bundle && zip -r ../media_bank_bundle.zip .)
-      - uses: actions/upload-artifact@v4
+
+      - name: Publier bundle
+        uses: actions/upload-artifact@v4
         with:
           name: media_bank_bundle
           path: media_bank_bundle.zip

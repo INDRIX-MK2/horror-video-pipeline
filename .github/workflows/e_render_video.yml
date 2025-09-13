@@ -45,24 +45,34 @@ jobs:
       video_path: ${{ steps.meta.outputs.video_path }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+
+      - name: Télécharger images (dossier)
+        uses: actions/download-artifact@v4
         with:
-          name: images_zip
-          path: .
-      - uses: actions/download-artifact@v4
+          name: images_dir
+          path: work/images
+
+      - name: Télécharger audio
+        uses: actions/download-artifact@v4
         with:
           name: voice_mp3
-          path: .
-      - uses: actions/download-artifact@v4
+          path: outputs
+
+      - name: Télécharger SRT
+        uses: actions/download-artifact@v4
         with:
           name: subtitles_srt
-          path: .
+          path: outputs
+
       - name: Installer FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg unzip
-      - name: Préparer
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Vérifier médias
         run: |
-          mkdir -p outputs work
-          unzip -o outputs/images.zip -d work
+          echo "Images:" && find work/images -type f -maxdepth 1 -print || true
+          echo "Audio:" && ls -l outputs/voice.mp3
+          echo "Sous-titres:" && ls -l outputs/subtitles.srt
+
       - name: Composer vidéo (placeholder robuste)
         env:
           RES:  ${{ inputs.target_res }}
@@ -72,14 +82,18 @@ jobs:
           FS:   ${{ inputs.subtitles_fontsize }}
           MV:   ${{ inputs.subtitles_margin_v }}
         run: |
+          mkdir -p outputs work
           ffmpeg -f lavfi -i color=c=black:s=${RES}:d=${MAX} -r ${FPS} -c:v libx264 -pix_fmt yuv420p work/base.mp4 -y
           ffmpeg -i work/base.mp4 -i outputs/voice.mp3 -shortest -c:v copy -c:a aac work/with_audio.mp4 -y
           ffmpeg -i work/with_audio.mp4 -vf "subtitles=outputs/subtitles.srt:force_style='Fontname=DejaVu Sans,Fontsize=${FS},Outline=2,Shadow=1,Alignment=5,MarginV=${MV}'" -c:a copy outputs/final.mp4 -y
-      - uses: actions/upload-artifact@v4
+
+      - name: Publier vidéo
+        uses: actions/upload-artifact@v4
         with:
           name: final_video_mp4
           path: outputs/final.mp4
           if-no-files-found: error
           retention-days: 7
+
       - id: meta
         run: echo "video_path=outputs/final.mp4" >> "$GITHUB_OUTPUT"

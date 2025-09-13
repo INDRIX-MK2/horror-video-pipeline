@@ -10,9 +10,9 @@ on:
         required: true
         type: string
     outputs:
-      images_zip:
-        description: "Archive des images"
-        value: ${{ jobs.fetch.outputs.images_zip }}
+      images_dir:
+        description: "Dossier contenant les images générées"
+        value: ${{ jobs.fetch.outputs.images_dir }}
 
 permissions:
   contents: read
@@ -21,23 +21,27 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     outputs:
-      images_zip: ${{ steps.meta.outputs.images_zip }}
+      images_dir: ${{ steps.meta.outputs.images_dir }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Générer images factices
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg zip
+          sudo apt-get update && sudo apt-get install -y ffmpeg
           mkdir -p outputs/images
           RES="${{ inputs.target_res }}"
           ffmpeg -f lavfi -i color=c=black:s=$RES:d=1 -frames:v 1 outputs/images/0001.png -y
           ffmpeg -f lavfi -i color=c=gray:s=$RES:d=1  -frames:v 1 outputs/images/0002.png -y
           ffmpeg -f lavfi -i color=c=white:s=$RES:d=1 -frames:v 1 outputs/images/0003.png -y
-          (cd outputs && zip -r images.zip images)
-      - uses: actions/upload-artifact@v4
+
+      - name: Publier artifact images (dossier)
+        uses: actions/upload-artifact@v4
         with:
-          name: images_zip
-          path: outputs/images.zip
+          name: images_dir
+          path: outputs/images
           if-no-files-found: error
           retention-days: 7
+
       - id: meta
-        run: echo "images_zip=outputs/images.zip" >> "$GITHUB_OUTPUT"
+        name: Exposer chemin dossier
+        run: echo "images_dir=outputs/images" >> "$GITHUB_OUTPUT"
