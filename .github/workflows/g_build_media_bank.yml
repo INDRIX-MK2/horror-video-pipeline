@@ -1,43 +1,148 @@
-name: g_build_media_bank
+name: g_build_mediabank
 on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Mot-clé pour Pexels/Pixabay (ex: horror)"
+        required: true
+        default: "horror"
+      per_source:
+        description: "Nb max d'items par source (images + vidéos)"
+        required: true
+        default: "60"
+      providers:
+        description: "Sources (pexels,pixabay)"
+        required: true
+        default: "pexels,pixabay"
   workflow_call:
+    inputs:
+      topic:
+        description: "Mot-clé pour Pexels/Pixabay"
+        required: true
+        type: string
+      per_source:
+        description: "Nb max par source"
+        required: true
+        type: string
+      providers:
+        description: "Sources à utiliser"
+        required: true
+        type: string
 
 jobs:
-  pack:
+  fetch_bank:
     runs-on: ubuntu-latest
+    env:
+      TOPIC: ${{ inputs.topic }}
+      PER_SOURCE: ${{ inputs.per_source }}
+      PROVIDERS: ${{ inputs.providers }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: story_txt
-          path: work
-      - uses: actions/download-artifact@v4
-        with:
-          name: captions_srt
-          path: work
-      - uses: actions/download-artifact@v4
-        with:
-          name: voice_wav
-          path: work
-      - uses: actions/download-artifact@v4
-        with:
-          name: images_zip
-          path: work
-      - uses: actions/download-artifact@v4
-        with:
-          name: final_mp4
-          path: work
+      - uses: actions/checkout@v4
 
-      - name: Create media bank
+      - name: Install dependencies
         run: |
-          mkdir -p outputs/media_bank
-          cp work/story.txt outputs/media_bank/
-          cp work/captions.srt outputs/media_bank/
-          cp work/voice.wav outputs/media_bank/
-          cp work/images.zip outputs/media_bank/
-          cp work/final.mp4 outputs/media_bank/
-          zip -r outputs/media_bank.zip outputs/media_bank
+          sudo apt-get update
+          sudo apt-get install -y jq curl wget zip
 
+      - name: Fetch Pexels Images
+        if: contains(env.PROVIDERS, 'pexels')
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          set -e
+          mkdir -p media_bank/images/pexels
+          [ -n "$PEXELS_API_KEY" ] || exit 0
+          page=1; got=0; target=$PER_SOURCE
+          while [ $got -lt $target ] && [ $page -le 10 ]; do
+            curl -sS "https://api.pexels.com/v1/search?query=${TOPIC}&per_page=30&page=${page}" \
+              -H "Authorization: ${PEXELS_API_KEY}" > pexels_img.json
+            count=$(jq '.photos | length' pexels_img.json)
+            [ "$count" -gt 0 ] || break
+            jq -r '.photos[].src.large' pexels_img.json | head -n $((target-got)) > urls.txt
+            i=0
+            while read -r url; do
+              wget -q -O "media_bank/images/pexels/pexels_${page}_$i.jpg" "$url" || true
+              i=$((i+1)); got=$((got+1))
+              [ $got -ge $target ] && break
+            done < urls.txt
+            page=$((page+1))
+          done
+
+      - name: Fetch Pexels Videos
+        if: contains(env.PROVIDERS, 'pexels')
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          set -e
+          mkdir -p media_bank/videos/pexels
+          [ -n "$PEXELS_API_KEY" ] || exit 0
+          page=1; got=0; target=$PER_SOURCE
+          while [ $got -lt $target ] && [ $page -le 10 ]; do
+            curl -sS "https://api.pexels.com/videos/search?query=${TOPIC}&per_page=30&page=${page}" \
+              -H "Authorization: ${PEXELS_API_KEY}" > pexels_vid.json
+            count=$(jq '.videos | length' pexels_vid.json)
+            [ "$count" -gt 0 ] || break
+            jq -r '.videos[].video_files | sort_by(.width) | .[0].link' pexels_vid.json | head -n $((target-got)) > urls.txt
+            i=0
+            while read -r url; do
+              wget -q -O "media_bank/videos/pexels/pexels_${page}_$i.mp4" "$url" || true
+              i=$((i+1)); got=$((got+1))
+              [ $got -ge $target ] && break
+            done < urls.txt
+            page=$((page+1))
+          done
+
+      - name: Fetch Pixabay Images
+        if: contains(env.PROVIDERS, 'pixabay')
+        env:
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: |
+          set -e
+          mkdir -p media_bank/images/pixabay
+          [ -n "$PIXABAY_API_KEY" ] || exit 0
+          page=1; got=0; target=$PER_SOURCE
+          while [ $got -lt $target ] && [ $page -le 10 ]; do
+            curl -sS "https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${TOPIC}&image_type=photo&per_page=50&page=${page}&safesearch=true" > pixabay_img.json
+            count=$(jq '.hits | length' pixabay_img.json)
+            [ "$count" -gt 0 ] || break
+            jq -r '.hits[].largeImageURL' pixabay_img.json | head -n $((target-got)) > urls.txt
+            i=0
+            while read -r url; do
+              wget -q -O "media_bank/images/pixabay/pixabay_${page}_$i.jpg" "$url" || true
+              i=$((i+1)); got=$((got+1))
+              [ $got -ge $target ] && break
+            done < urls.txt
+            page=$((page+1))
+          done
+
+      - name: Fetch Pixabay Videos
+        if: contains(env.PROVIDERS, 'pixabay')
+        env:
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: |
+          set -e
+          mkdir -p media_bank/videos/pixabay
+          [ -n "$PIXABAY_API_KEY" ] || exit 0
+          page=1; got=0; target=$PER_SOURCE
+          while [ $got -lt $target ] && [ $page -le 10 ]; do
+            curl -sS "https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${TOPIC}&per_page=50&page=${page}&safesearch=true" > pixabay_vid.json
+            count=$(jq '.hits | length' pixabay_vid.json)
+            [ "$count" -gt 0 ] || break
+            jq -r '.hits[].videos.small.url // .hits[].videos.tiny.url' pixabay_vid.json | head -n $((target-got)) > urls.txt
+            i=0
+            while read -r url; do
+              wget -q -O "media_bank/videos/pixabay/pixabay_${page}_$i.mp4" "$url" || true
+              i=$((i+1)); got=$((got+1))
+              [ $got -ge $target ] && break
+            done < urls.txt
+            page=$((page+1))
+          done
+
+      - name: Pack & upload media_bank
+        run: zip -r media_bank.zip media_bank
       - uses: actions/upload-artifact@v4
         with:
-          name: media_bank_zip
-          path: outputs/media_bank.zip
+          name: media_bank
+          path: |
+            media_bank
+            media_bank.zip

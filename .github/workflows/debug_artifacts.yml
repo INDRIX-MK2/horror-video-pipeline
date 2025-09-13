@@ -1,4 +1,4 @@
-﻿name: debug_artifacts
+﻿name: Z - Debug Artifacts
 on:
   workflow_dispatch:
 
@@ -8,34 +8,34 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: story_txt
-          path: fetched
+          name: story
+          path: debug
         continue-on-error: true
       - uses: actions/download-artifact@v4
         with:
-          name: voice_wav
-          path: fetched
+          name: voice
+          path: debug
         continue-on-error: true
       - uses: actions/download-artifact@v4
         with:
-          name: images_zip
-          path: fetched
+          name: selected_media
+          path: debug
         continue-on-error: true
       - uses: actions/download-artifact@v4
         with:
-          name: captions_srt
-          path: fetched
+          name: subtitles
+          path: debug
         continue-on-error: true
       - uses: actions/download-artifact@v4
         with:
-          name: final_mp4
-          path: fetched
+          name: final_video
+          path: debug
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: media_bank
+          path: debug
         continue-on-error: true
 
-      - name: Tree
-        run: ls -R fetched || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: debug_bundle
-          path: fetched
+      - name: List artifacts
+        run: ls -R debug || true

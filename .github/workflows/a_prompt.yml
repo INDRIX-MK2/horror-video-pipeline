@@ -1,28 +1,35 @@
-﻿name: a_prompt
+﻿name: A - Generate Story Prompt
 on:
   workflow_call:
     inputs:
       topic:
-        description: "Thème de l'histoire"
+        description: "Thème/seed de l'histoire"
         required: true
         type: string
 
 jobs:
-  generate:
+  generate_story:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate story text
+      - name: Generate horror story via GPT-5 mini (gpt-5-mini)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          set -e
           mkdir -p outputs
-          echo "Sujet: ${{ inputs.topic }}" > outputs/story.txt
-          echo "" >> outputs/story.txt
-          echo "Il faisait nuit noire et le vent soufflait fort..." >> outputs/story.txt
-          echo "Une histoire d'horreur générée automatiquement." >> outputs/story.txt
+          prompt=$(printf "%s\n" \
+            "Écris une micro-fiction d’horreur en français de 180 à 200 mots (lecture 65–75s)." \
+            "Sois immersif, sensoriel, sans clichés faciles. Sujet : ${{ inputs.topic }}." \
+          )
+          response=$(curl -sS -H "Authorization: Bearer $OPENAI_API_KEY" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"model\":\"gpt-4o-mini\",\"temperature\":1,\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}]}" \
+                            https://api.openai.com/v1/chat/completions \
+                      | jq -r '.choices[0].message.content')
+          echo "$response" > outputs/story.txt
 
       - name: Upload story artifact
         uses: actions/upload-artifact@v4
         with:
-          name: story_txt
+          name: story
           path: outputs/story.txt
