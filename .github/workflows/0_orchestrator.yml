@@ -43,7 +43,6 @@ jobs:
           name: media_bank
           path: work
 
-      # Sélectionne jusqu'à 12 assets (vidéos d'abord, puis images)
       - name: Select up to 12 assets (videos+images)
         run: |
           set -euo pipefail
@@ -60,10 +59,11 @@ jobs:
           if [ "$RESTE" -gt 0 ]; then
             head -n "$RESTE" work/_all_images.txt > work/_take_images.txt || true
           else
-            > work/_take_images.txt
+            true > work/_take_images.txt
           fi
 
-          > work/_selected.txt
+          # vide/initialise le fichier sélection
+          true > work/_selected.txt
           cat work/_take_videos.txt >> work/_selected.txt
           cat work/_take_images.txt >> work/_selected.txt
 
@@ -90,7 +90,6 @@ jobs:
                 ffmpeg -y -loglevel error -i "$src" -vf "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2" "build/${base##*/}.png"
                 ;;
               mp4|MP4)
-                # on garde les mp4 tels quels
                 :
                 ;;
               *)
@@ -114,7 +113,7 @@ jobs:
           echo "Durée par image = $PER s (N=$N, cible=$TARGET s)"
 
           FILELIST="build/filelist.txt"
-          > "$FILELIST"
+          true > "$FILELIST"
           for img in $(ls build/*.png | sort); do
             printf "file '%s'\n" "$img" >> "$FILELIST"
             printf "duration %s\n" "$PER" >> "$FILELIST"
