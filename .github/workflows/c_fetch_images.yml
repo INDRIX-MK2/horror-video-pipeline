@@ -1,53 +1,35 @@
-﻿name: c_fetch_images
+﻿name: C - Fetch Media For Video
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
-      query:
+      count:
+        description: "Nombre d'éléments à sélectionner"
         required: true
-        type: string
-      target_res:
-        required: true
-        type: string
-    outputs:
-      images_dir:
-        description: "Dossier contenant les images générées"
-        value: ${{ jobs.fetch.outputs.images_dir }}
-
-permissions:
-  contents: read
+        default: "12"
 
 jobs:
-  fetch:
+  fetch_media:
     runs-on: ubuntu-latest
-    outputs:
-      images_dir: ${{ steps.meta.outputs.images_dir }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Générer images factices (tests)
-        run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-          mkdir -p outputs/images
-          RES="${{ inputs.target_res }}"
-          # 12 images pour un slideshow fluide (suffira avec per-image 5s => 60s; le reste est pad/timing)
-          for i in $(seq 1 12); do
-            printf -v n "%04d" "$i"
-            # Couleur variable pour debug
-            case $((i%3)) in
-              0) C="black" ;;
-              1) C="gray" ;;
-              2) C="white" ;;
-            esac
-            ffmpeg -f lavfi -i color=c=${C}:s=$RES:d=1 -frames:v 1 "outputs/images/${n}.png" -y
-          done
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Publier artifact images (dossier)
+      - name: Download media bank artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: media_bank
+          path: media_bank
+
+      - name: Select random media
+        run: |
+          mkdir -p outputs/images
+          mkdir -p outputs/videos
+          shuf -n ${{ github.event.inputs.count }} -e media_bank/images/* | xargs -I{} cp {} outputs/images/
+          shuf -n ${{ github.event.inputs.count }} -e media_bank/videos/* | xargs -I{} cp {} outputs/videos/
+
+      - name: Upload selected media
         uses: actions/upload-artifact@v4
         with:
-          name: images_dir
-          path: outputs/images
-          if-no-files-found: error
-          retention-days: 7
-
-      - id: meta
-        run: echo "images_dir=outputs/images" >> "$GITHUB_OUTPUT"
+          name: selected_media
+          path: outputs

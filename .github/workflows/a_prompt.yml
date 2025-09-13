@@ -1,41 +1,47 @@
-﻿name: a_prompt
+﻿name: A - Generate Story Prompt
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
-      locale: { required: true, type: string }
-      topic:  { required: true, type: string }
-    outputs:
-      script_path:
-        description: "Chemin du prompt généré"
-        value: ${{ jobs.generate.outputs.script_path }}
-
-permissions:
-  contents: read
+      theme:
+        description: "Thème de l'histoire"
+        required: true
+        default: "Horreur"
 
 jobs:
-  generate:
+  generate_prompt:
     runs-on: ubuntu-latest
-    outputs:
-      script_path: ${{ steps.meta.outputs.script_path }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Préparer
-        run: mkdir -p outputs
-
-      - name: Générer prompt (placeholder)
+      - name: Generate story text
         run: |
-          printf "Langue=%s\nSujet=%s\n\nHistoire courte...\n" \
-            "${{ inputs.locale }}" "${{ inputs.topic }}" > outputs/prompt.txt
+          mkdir -p outputs
+          STORY=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "gpt-5-mini",
+              "temperature": 1,
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "Tu es un créateur d\'histoires TikTok d\'horreur. Génère une histoire de 180 à 200 mots, captivante, qui se termine par un twist final."
+                },
+                {
+                  "role": "user",
+                  "content": "${{ github.event.inputs.theme }}"
+                }
+              ]
+            }' | jq -r '.choices[0].message.content')
 
-      - name: Upload prompt
+          echo "$STORY" > outputs/story.txt
+          echo "Story generated:"
+          cat outputs/story.txt
+
+      - name: Upload story artifact
         uses: actions/upload-artifact@v4
         with:
-          name: prompt_txt
-          path: outputs/prompt.txt
-          if-no-files-found: error
-          retention-days: 7
-
-      - id: meta
-        run: echo "script_path=outputs/prompt.txt" >> "$GITHUB_OUTPUT"
+          name: story
+          path: outputs/story.txt

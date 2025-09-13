@@ -1,42 +1,20 @@
-﻿name: f_publish_discord
+﻿name: F - Publish to Discord
 
 on:
-  workflow_call:
-    inputs:
-      locale:
-        required: true
-        type: string
-      video_path:
-        required: true
-        type: string
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
-  publish:
+  publish_discord:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Télécharger la vidéo
+      - name: Download final video
         uses: actions/download-artifact@v4
         with:
-          name: final_video_mp4
-          path: outputs
+          name: final_video
+          path: work
 
-      - name: Vérifier vidéo avant envoi
+      - name: Send to Discord
         run: |
-          echo "Chemin attendu : ${{ inputs.video_path }}"
-          ls -lh "${{ inputs.video_path }}" || (echo "VIDÉO MANQUANTE !" && exit 1)
-
-      - name: Envoyer sur Discord
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          test -n "$DISCORD_WEBHOOK_URL"
-          echo '{"content":"🎬 Nouvelle vidéo ('"${{ inputs.locale }}"')"}' > payload.json
-          curl -sS -X POST \
-            -F "payload_json=@payload.json" \
-            -F "file=@${{ inputs.video_path }};type=video/mp4" \
-            "$DISCORD_WEBHOOK_URL"
+          curl -F "payload_json={\"content\": \"Nouvelle vidéo générée !\"}" \
+               -F "file=@work/final.mp4" \
+               ${{ secrets.DISCORD_WEBHOOK_URL }}

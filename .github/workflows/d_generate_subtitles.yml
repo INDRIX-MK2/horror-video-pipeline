@@ -1,53 +1,38 @@
-﻿name: d_generate_subtitles
+﻿name: G - Generate Subtitles
 
 on:
-  workflow_call:
-    inputs:
-      script_path:
-        required: true
-        type: string
-      subtitles_fontsize:
-        required: false
-        type: number
-      subtitles_margin_v:
-        required: false
-        type: number
-    outputs:
-      captions_path:
-        description: "Chemin du SRT"
-        value: ${{ jobs.subs.outputs.captions_path }}
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
-  subs:
+  generate_subtitles:
     runs-on: ubuntu-latest
-    outputs:
-      captions_path: ${{ steps.meta.outputs.captions_path }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download story
+        uses: actions/download-artifact@v4
         with:
-          name: prompt_txt
-          path: .
-      - name: Générer SRT (placeholder)
+          name: story
+          path: work
+
+      - name: Generate subtitles
         run: |
           mkdir -p outputs
-          cat > outputs/subtitles.srt <<'EOF'
-          1
-          00:00:00,000 --> 00:00:02,000
-          Titre d'intro
+          # SRT simple
+          awk 'BEGIN{print "1\n00:00:00,000 --> 00:00:20,000"}{print}' work/story.txt > outputs/captions.srt
+          # ASS pour karaoké
+          echo "[Script Info]" > outputs/captions.ass
+          echo "ScriptType: v4.00+" >> outputs/captions.ass
+          echo "[V4+ Styles]" >> outputs/captions.ass
+          echo "Format: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding" >> outputs/captions.ass
+          echo "Style: Default,DejaVu Sans,20,&H00FFFF00,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,0" >> outputs/captions.ass
+          echo "[Events]" >> outputs/captions.ass
+          echo "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text" >> outputs/captions.ass
+          echo "Dialogue: 0,0:00:00.00,0:00:20.00,Default,,0,0,0,karaoke,{\k20}$(cat work/story.txt)" >> outputs/captions.ass
 
-          2
-          00:00:02,000 --> 00:00:04,000
-          Sous-titres d'exemple
-          EOF
-      - uses: actions/upload-artifact@v4
+      - name: Upload subtitles
+        uses: actions/upload-artifact@v4
         with:
-          name: subtitles_srt
-          path: outputs/subtitles.srt
-          if-no-files-found: error
-          retention-days: 7
-      - id: meta
-        run: echo "captions_path=outputs/subtitles.srt" >> "$GITHUB_OUTPUT"
+          name: subtitles
+          path: outputs

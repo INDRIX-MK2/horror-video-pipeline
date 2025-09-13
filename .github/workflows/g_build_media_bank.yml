@@ -1,71 +1,43 @@
-name: g_build_media_bank
+name: Build Media Bank
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
-      query:
+      theme:
+        description: "Thème pour les médias"
         required: true
-        type: string
-      video_path:
-        required: true
-        type: string
-      captions_path:
-        required: true
-        type: string
-      voice_path:
-        required: true
-        type: string
-
-permissions:
-  contents: read
+        default: "Horreur"
 
 jobs:
-  archive:
+  build_mediabank:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Télécharger images (dossier)
-        uses: actions/download-artifact@v4
-        with:
-          name: images_dir
-          path: outputs/images
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: final_video_mp4
-          path: outputs
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: subtitles_srt
-          path: outputs
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: voice_mp3
-          path: outputs
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: prompt_txt
-          path: outputs
-
-      - name: Packager bundle
+      - name: Create folders
         run: |
-          mkdir -p bundle
-          cp -r outputs/images             bundle/images
-          cp ${{ inputs.video_path }}      bundle/
-          cp ${{ inputs.captions_path }}   bundle/
-          cp ${{ inputs.voice_path }}      bundle/
-          cp outputs/prompt.txt            bundle/
-          printf "%s\n" "${{ inputs.query }}" > bundle/image_query.txt
-          (cd bundle && zip -r ../media_bank_bundle.zip .)
+          mkdir -p media_bank/images
+          mkdir -p media_bank/videos
 
-      - name: Publier bundle
+      - name: Download images from Pexels
+        run: |
+          for i in $(seq 1 100); do
+            URL=$(curl -s "https://api.pexels.com/v1/search?query=${{ github.event.inputs.theme }}&per_page=1&page=$i" \
+              -H "Authorization: ${{ secrets.PEXELS_API_KEY }}" | jq -r '.photos[0].src.original')
+            wget -q -O "media_bank/images/${i}.jpg" "$URL"
+          done
+
+      - name: Download videos from Pixabay
+        run: |
+          for i in $(seq 1 100); do
+            URL=$(curl -s "https://pixabay.com/api/videos/?key=${{ secrets.PIXABAY_API_KEY }}&q=${{ github.event.inputs.theme }}&per_page=1&page=$i" \
+              | jq -r '.hits[0].videos.medium.url')
+            wget -q -O "media_bank/videos/${i}.mp4" "$URL"
+          done
+
+      - name: Upload media bank artifact
         uses: actions/upload-artifact@v4
         with:
-          name: media_bank_bundle
-          path: media_bank_bundle.zip
-          if-no-files-found: error
-          retention-days: 30
+          name: media_bank
+          path: media_bank

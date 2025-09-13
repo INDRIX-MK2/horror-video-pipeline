@@ -1,177 +1,44 @@
-﻿name: Render Video
+﻿name: E - Render Final Video
 
 on:
-  workflow_call:
-    inputs:
-      images_zip:
-        description: "Archive des images (.zip)"
-        required: true
-        type: string
-      audio_path:
-        description: "Fichier audio (mp3/wav)"
-        required: true
-        type: string
-      captions_path:
-        description: "Sous-titres (SRT/ASS) à graver (optionnel)"
-        required: false
-        type: string
-        default: ""
-      min_duration_sec:
-        description: "Durée minimale en secondes"
-        required: false
-        type: number
-        default: 65
-      max_duration_sec:
-        description: "Durée maximale en secondes (0 = illimité)"
-        required: false
-        type: number
-        default: 0
-      target_res:
-        description: "Résolution cible LxH (ex: 720x1280)"
-        required: false
-        type: string
-        default: 720x1280
-      fps:
-        description: "Images par seconde"
-        required: false
-        type: number
-        default: 25
-    outputs:
-      final_video:
-        description: "Chemin vers la vidéo finale générée"
-        value: ${{ jobs.render.outputs.final_video }}
+  workflow_dispatch:
 
 jobs:
-  render:
+  render_video:
     runs-on: ubuntu-latest
-    outputs:
-      final_video: ${{ steps.set_out.outputs.final_video }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg and unzip
+      - name: Download selected media
+        uses: actions/download-artifact@v4
+        with:
+          name: selected_media
+          path: work
+
+      - name: Download voice
+        uses: actions/download-artifact@v4
+        with:
+          name: voice
+          path: work
+
+      - name: Download subtitles
+        uses: actions/download-artifact@v4
+        with:
+          name: subtitles
+          path: work
+
+      - name: Render video
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg unzip
+          mkdir -p outputs
+          ls work/images/* | sort | awk '{print "file \x27"$0"\x27\nduration 5"}' > work/filelist.txt
+          ffmpeg -y -f concat -safe 0 -i work/filelist.txt -i work/voice.mp3 \
+            -vf "subtitles=work/captions.ass:force_style='Fontsize=20'" \
+            -af "afade=t=in:ss=0:d=2,afade=t=out:st=18:d=2" \
+            -c:v libx264 -pix_fmt yuv420p -c:a aac outputs/final.mp4
 
-      - name: Prepare folders
-        run: |
-          set -euo pipefail
-          mkdir -p work build outputs
-          rm -rf build/*
-
-      - name: Unzip images
-        run: |
-          set -euo pipefail
-          ZIP="${{ inputs.images_zip }}"
-          if [ ! -f "$ZIP" ]; then
-            echo "❌ Archive introuvable: $ZIP" >&2
-            exit 1
-          fi
-          rm -rf work/images
-          mkdir -p work/images
-          unzip -qq "$ZIP" -d work/images
-
-      - name: Normalize images to target resolution
-        run: |
-          set -euo pipefail
-          RES="${{ inputs.target_res }}"
-          shopt -s nullglob
-          # On parcourt récursivement (extensions variées, casse insensible)
-          mapfile -t IMGS < <(find work/images -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) | sort)
-          if [ "${#IMGS[@]}" -eq 0 ]; then
-            echo "❌ Aucune image trouvée dans l'archive après extraction" >&2
-            exit 1
-          fi
-          idx=1
-          for img in "${IMGS[@]}"; do
-            printf -v out "build/%04d.png" "$idx"
-            ffmpeg -y -i "$img" \
-              -vf "scale=${RES}:force_original_aspect_ratio=decrease,pad=${RES}:(ow-iw)/2:(oh-ih)/2" \
-              "$out" >/dev/null 2>&1
-            idx=$((idx+1))
-          done
-          echo "== DEBUG images normalisées =="
-          ls -lh build
-
-      - name: Build filelist.txt (concat)
-        id: build_list
-        run: |
-          set -euo pipefail
-          AUDIO="${{ inputs.audio_path }}"
-          if [ ! -f "$AUDIO" ]; then
-            echo "❌ Fichier audio introuvable: $AUDIO" >&2
-            exit 1
-          fi
-
-          COUNT=$(ls build/*.png 2>/dev/null | wc -l | awk '{print int($1)}')
-          if [ "$COUNT" -eq 0 ]; then
-            echo "❌ Aucune image trouvée après normalisation" >&2
-            exit 1
-          fi
-
-          AUDIO_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$AUDIO" | awk '{print int($1)}')
-          MIN=${{ inputs.min_duration_sec }}
-          MAX=${{ inputs.max_duration_sec }}
-
-          TARGET="$MIN"
-          if [ "$AUDIO_DUR" -gt "$TARGET" ]; then
-            TARGET="$AUDIO_DUR"
-          fi
-          if [ "$MAX" -gt 0 ] && [ "$TARGET" -gt "$MAX" ]; then
-            TARGET="$MAX"
-          fi
-
-          PER_IMAGE=$(awk "BEGIN {printf \"%.2f\", $TARGET / $COUNT}")
-
-          echo "Durée audio=${AUDIO_DUR}s, cible=${TARGET}s"
-          echo "Durée par image=${PER_IMAGE}s (N=${COUNT})"
-
-          FILELIST="build/filelist.txt"
-          : > "$FILELIST"
-          for img in $(ls build/*.png | sort); do
-            printf "file '%s/%s'\n" "$PWD" "$img" >> "$FILELIST"
-            printf "duration %s\n" "$PER_IMAGE" >> "$FILELIST"
-          done
-          LAST=$(ls build/*.png | sort | tail -n 1)
-          printf "file '%s/%s'\n" "$PWD" "$LAST" >> "$FILELIST"
-
-          echo "=== filelist.txt ==="
-          cat "$FILELIST"
-
-          echo "filelist=$FILELIST" >> $GITHUB_OUTPUT
-
-      - name: Render final video (with/without subtitles)
-        run: |
-          set -euo pipefail
-          FILELIST="${{ steps.build_list.outputs.filelist }}"
-          AUDIO="${{ inputs.audio_path }}"
-          OUT="outputs/final.mp4"
-          CAPTIONS="${{ inputs.captions_path }}"
-          FPS="${{ inputs.fps }}"
-
-          # Pour chemins avec caractères spéciaux, utilise l'option f= du filtre subtitles
-          if [ -n "$CAPTIONS" ] && [ -f "$CAPTIONS" ]; then
-            echo "🎞️ Gravure des sous-titres activée."
-            ffmpeg -y -f concat -safe 0 -i "$FILELIST" \
-              -i "$AUDIO" \
-              -vf "subtitles=f='${CAPTIONS}':force_style='Fontsize=54,MarginV=40'" \
-              -c:v libx264 -pix_fmt yuv420p -r "$FPS" -c:a aac -shortest "$OUT"
-          else
-            echo "ℹ️ Pas de sous-titres à graver."
-            ffmpeg -y -f concat -safe 0 -i "$FILELIST" \
-              -i "$AUDIO" \
-              -c:v libx264 -pix_fmt yuv420p -r "$FPS" -c:a aac -shortest "$OUT"
-          fi
-
-      - name: Set output path
-        id: set_out
-        run: echo "final_video=outputs/final.mp4" >> $GITHUB_OUTPUT
-
-      - name: Upload artifact
+      - name: Upload final video
         uses: actions/upload-artifact@v4
         with:
-          name: final-video
+          name: final_video
           path: outputs/final.mp4

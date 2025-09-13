@@ -1,49 +1,33 @@
-﻿name: b_voiceover
+﻿name: B - Generate Voiceover
 
 on:
-  workflow_call:
-    inputs:
-      voice_id:
-        required: true
-        type: string
-      script_path:
-        required: true
-        type: string
-    outputs:
-      voice_path:
-        description: "Chemin du MP3 généré"
-        value: ${{ jobs.tts.outputs.voice_path }}
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
-  tts:
+  voiceover:
     runs-on: ubuntu-latest
-    outputs:
-      voice_path: ${{ steps.meta.outputs.voice_path }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Télécharger le prompt
+      - name: Download story
         uses: actions/download-artifact@v4
         with:
-          name: prompt_txt
-          path: .
+          name: story
+          path: work
 
-      - name: Simuler TTS (placeholder)
+      - name: Generate voice using ElevenLabs
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
           mkdir -p outputs
-          ffmpeg -f lavfi -i anullsrc=cl=stereo:r=44100 -t 3 -q:a 3 outputs/voice.mp3 -y
+          TEXT=$(cat work/story.txt | jq -Rs .)
+          curl -s -X POST "https://api.elevenlabs.io/v1/text-to-speech/${{ secrets.ELEVENLABS_VOICE_ID }}" \
+            -H "xi-api-key: ${{ secrets.ELEVENLABS_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":$TEXT,\"voice_settings\":{\"stability\":0.75,\"similarity_boost\":0.85}}" \
+            --output outputs/voice.mp3
 
-      - name: Publier la voix
+      - name: Upload voice
         uses: actions/upload-artifact@v4
         with:
-          name: voice_mp3
+          name: voice
           path: outputs/voice.mp3
-          if-no-files-found: error
-          retention-days: 7
-
-      - id: meta
-        run: echo "voice_path=outputs/voice.mp3" >> "$GITHUB_OUTPUT"
