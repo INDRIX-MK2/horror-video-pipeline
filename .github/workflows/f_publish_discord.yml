@@ -35,7 +35,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           test -n "$DISCORD_WEBHOOK_URL"
-          echo '{"content":"🎬 Nouvelle vidéo !"}' > payload.json
+          echo '{"content":"🎬 Nouvelle vidéo ('"${{ inputs.locale }}"')"}' > payload.json
           curl -sS -X POST \
             -F "payload_json=@payload.json" \
             -F "file=@${{ inputs.video_path }};type=video/mp4" \

@@ -5,22 +5,22 @@ on:
     inputs:
       target_res:
         required: true
-        type: string
+        type: string             # ex: "720x1280"
       fps:
         required: true
-        type: number
+        type: number             # ex: 30
       min_duration_sec:
         required: true
-        type: number
+        type: number             # ex: 65
       max_duration_sec:
         required: true
-        type: number
+        type: number             # ex: 75
       captions_path:
         required: true
-        type: string
+        type: string             # ex: outputs/subtitles.srt
       voice_path:
         required: true
-        type: string
+        type: string             # ex: outputs/voice.mp3
       mute_stock_clips:
         required: true
         type: boolean
@@ -30,6 +30,9 @@ on:
       subtitles_margin_v:
         required: true
         type: number
+      music_url:
+        required: false
+        type: string             # Optionnel: URL d'une musique libre de droits
     outputs:
       video_path:
         description: "Chemin de la vidéo finale"
@@ -46,13 +49,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # IMAGES (dossier) + VOIX + SRT depuis les artifacts produits en amont
       - name: Télécharger images (dossier)
         uses: actions/download-artifact@v4
         with:
           name: images_dir
           path: work/images
 
-      - name: Télécharger audio
+      - name: Télécharger audio (voix)
         uses: actions/download-artifact@v4
         with:
           name: voice_mp3
@@ -64,28 +68,116 @@ jobs:
           name: subtitles_srt
           path: outputs
 
-      - name: Installer FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # (Optionnel) Télécharger musique de fond si URL fournie
+      - name: Télécharger musique (optionnel)
+        if: ${{ inputs.music_url != '' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y curl
+          mkdir -p outputs
+          curl -L --fail -o outputs/music.mp3 "${{ inputs.music_url }}"
+
+      - name: Installer FFmpeg + outils
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg coreutils jq
 
       - name: Vérifier médias
         run: |
-          echo "Images:" && find work/images -type f -maxdepth 1 -print || true
-          echo "Audio:" && ls -l outputs/voice.mp3
-          echo "Sous-titres:" && ls -l outputs/subtitles.srt
+          echo "== IMAGES ==" && find work/images -maxdepth 1 -type f | sort
+          echo "== VOIX ==" && ls -l outputs/voice.mp3
+          echo "== SRT ==" && ls -l outputs/subtitles.srt || true
+          if [ -n "${{ inputs.music_url }}" ]; then echo "== MUSIC ==" && ls -l outputs/music.mp3; fi
 
-      - name: Composer vidéo (placeholder robuste)
+      - name: Construire slideshow 9:16 à la bonne durée
         env:
           RES:  ${{ inputs.target_res }}
           FPS:  ${{ inputs.fps }}
           MIN:  ${{ inputs.min_duration_sec }}
           MAX:  ${{ inputs.max_duration_sec }}
-          FS:   ${{ inputs.subtitles_fontsize }}
-          MV:   ${{ inputs.subtitles_margin_v }}
         run: |
-          mkdir -p outputs work
-          ffmpeg -f lavfi -i color=c=black:s=${RES}:d=${MAX} -r ${FPS} -c:v libx264 -pix_fmt yuv420p work/base.mp4 -y
-          ffmpeg -i work/base.mp4 -i outputs/voice.mp3 -shortest -c:v copy -c:a aac work/with_audio.mp4 -y
-          ffmpeg -i work/with_audio.mp4 -vf "subtitles=outputs/subtitles.srt:force_style='Fontname=DejaVu Sans,Fontsize=${FS},Outline=2,Shadow=1,Alignment=5,MarginV=${MV}'" -c:a copy outputs/final.mp4 -y
+          set -euo pipefail
+          mkdir -p work build outputs
+
+          # Split résolution
+          W="${RES%x*}"; H="${RES#*x}"
+
+          # Collecter images triées (noms 0001.png, 0002.png, …)
+          mapfile -t IMGS < <(find work/images -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) | sort)
+          if [ "${#IMGS[@]}" -eq 0 ]; then
+            echo "Aucune image trouvée dans work/images"; exit 1
+          fi
+
+          # Normaliser chaque image au format 9:16 via scale+pad (letterbox)
+          i=0
+          for f in "${IMGS[@]}"; do
+            i=$((i+1))
+            printf -v out "build/%04d.png" "$i"
+            ffmpeg -y -i "$f" -vf "scale='if(gt(a,$W/$H),$W,-1)':'if(gt(a,$W/$H),-1,$H)',pad=$W:$H:(ow-iw)/2:(oh-ih)/2" -frames:v 1 "$out"
+          done
+
+          # Durée cible = max(MIN, durée audio), plafonnée à MAX
+          ASEC=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "outputs/voice.mp3" | awk '{printf("%.0f",$1)}')
+          [ -z "$ASEC" ] && ASEC=$MIN
+          TGT=$MIN
+          if [ "$ASEC" -gt "$TGT" ]; then TGT="$ASEC"; fi
+          if [ "$TGT" -gt "$MAX" ]; then TGT="$MAX"; fi
+          echo "Durée audio=${ASEC}s, cible=${TGT}s"
+
+          N=${#IMGS[@]}
+          # Durée par image (on borne entre 1.5s et 5s)
+          per=$(awk -v T="$TGT" -v N="$N" 'BEGIN{d=T/N; if(d<1.5)d=1.5; if(d>5)d=5; printf("%.2f",d)}')
+          echo "Durée par image=${per}s"
+
+          # Générer filelist concat avec 'duration'
+          FL="build/filelist.txt"
+          : > "$FL"
+          for f in $(ls build/*.png | sort); do
+            echo "file '$f'" >> "$FL"
+            echo "duration $per" >> "$FL"
+          done
+          # Le concat demande la dernière image répétée sans duration
+          last=$(ls build/*.png | sort | tail -n 1)
+          echo "file '$last'" >> "$FL"
+
+          # Créer le slideshow à la résolution cible
+          ffmpeg -y -f concat -safe 0 -i "$FL" -vsync vfr -pix_fmt yuv420p -r "$FPS" "work/slideshow.mp4"
+
+          # Ajuster à la durée cible via -t (tronque si dépasse), sinon on tpad si trop court
+          CUR=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "work/slideshow.mp4")
+          need=$(awk -v cur="$CUR" -v tgt="$TGT" 'BEGIN{if(cur<tgt)print 1; else print 0}')
+          if [ "$need" -eq 1 ]; then
+            # pad vidéo en répétant la dernière frame
+            ffmpeg -y -i work/slideshow.mp4 -vf "tpad=stop_mode=clone:stop_duration=$(awk -v cur="$CUR" -v tgt="$TGT" 'BEGIN{d=tgt-cur; if(d<0)d=0; print d}')" -r "$FPS" work/slideshow_padded.mp4
+            mv work/slideshow_padded.mp4 work/slideshow.mp4
+          fi
+          ffmpeg -y -i work/slideshow.mp4 -t "$TGT" -c:v libx264 -pix_fmt yuv420p work/slideshow_trim.mp4
+
+          mv work/slideshow_trim.mp4 work/slideshow.mp4
+
+      - name: Mixer audio (voix + musique optionnelle)
+        run: |
+          set -euo pipefail
+          if [ -f "outputs/music.mp3" ]; then
+            # Voix 1.0, musique 0.25
+            ffmpeg -y -i work/slideshow.mp4 -i outputs/voice.mp3 -i outputs/music.mp3 \
+              -filter_complex "[1:a]volume=1.0[a1];[2:a]volume=0.25[a2];[a1][a2]amix=inputs=2:normalize=0[aout]" \
+              -map 0:v -map "[aout]" -c:v copy -c:a aac -shortest work/with_audio.mp4
+          else
+            ffmpeg -y -i work/slideshow.mp4 -i outputs/voice.mp3 -map 0:v -map 1:a -c:v copy -c:a aac -shortest work/with_audio.mp4
+          fi
+
+      - name: Appliquer sous-titres stylés
+        env:
+          FS: ${{ inputs.subtitles_fontsize }}
+          MV: ${{ inputs.subtitles_margin_v }}
+        run: |
+          set -euo pipefail
+          if [ -f "outputs/subtitles.srt" ]; then
+            ffmpeg -y -i work/with_audio.mp4 \
+              -vf "subtitles=outputs/subtitles.srt:force_style='Fontname=DejaVu Sans,Fontsize=${FS},Outline=2,Shadow=1,Alignment=5,MarginV=${MV}'" \
+              -c:a copy outputs/final.mp4
+          else
+            echo "Aucun SRT trouvé, on sort la vidéo sans sous-titres"
+            cp work/with_audio.mp4 outputs/final.mp4
+          fi
 
       - name: Publier vidéo
         uses: actions/upload-artifact@v4

@@ -24,15 +24,22 @@ jobs:
       images_dir: ${{ steps.meta.outputs.images_dir }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Générer images factices
+      - name: Générer images factices (tests)
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
           mkdir -p outputs/images
           RES="${{ inputs.target_res }}"
-          ffmpeg -f lavfi -i color=c=black:s=$RES:d=1 -frames:v 1 outputs/images/0001.png -y
-          ffmpeg -f lavfi -i color=c=gray:s=$RES:d=1  -frames:v 1 outputs/images/0002.png -y
-          ffmpeg -f lavfi -i color=c=white:s=$RES:d=1 -frames:v 1 outputs/images/0003.png -y
+          # 12 images pour un slideshow fluide (suffira avec per-image 5s => 60s; le reste est pad/timing)
+          for i in $(seq 1 12); do
+            printf -v n "%04d" "$i"
+            # Couleur variable pour debug
+            case $((i%3)) in
+              0) C="black" ;;
+              1) C="gray" ;;
+              2) C="white" ;;
+            esac
+            ffmpeg -f lavfi -i color=c=${C}:s=$RES:d=1 -frames:v 1 "outputs/images/${n}.png" -y
+          done
 
       - name: Publier artifact images (dossier)
         uses: actions/upload-artifact@v4
@@ -43,5 +50,4 @@ jobs:
           retention-days: 7
 
       - id: meta
-        name: Exposer chemin dossier
         run: echo "images_dir=outputs/images" >> "$GITHUB_OUTPUT"
