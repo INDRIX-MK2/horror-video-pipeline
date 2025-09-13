@@ -1,41 +1,64 @@
-name: Build Media Bank
+name: build_mediabank
 
 on:
   workflow_dispatch:
     inputs:
       theme:
-        description: "Thème pour les médias"
+        description: "Theme for media search (comma separated)"
         required: true
-        default: "Horreur"
+        default: "horror, dark alley, haunted house, creepy forest, ghost"
 
 jobs:
   build_mediabank:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq wget
 
       - name: Create folders
         run: |
           mkdir -p media_bank/images
           mkdir -p media_bank/videos
 
+      # =============================
+      # PEXELS - DOWNLOAD IMAGES
+      # =============================
       - name: Download images from Pexels
         run: |
-          for i in $(seq 1 100); do
-            URL=$(curl -s "https://api.pexels.com/v1/search?query=${{ github.event.inputs.theme }}&per_page=1&page=$i" \
-              -H "Authorization: ${{ secrets.PEXELS_API_KEY }}" | jq -r '.photos[0].src.original')
-            wget -q -O "media_bank/images/${i}.jpg" "$URL"
+          for keyword in $(echo "${{ github.event.inputs.theme }}" | tr ',' ' '); do
+            echo "Downloading images for theme: $keyword"
+            for i in $(seq 1 20); do
+              URL=$(curl -s "https://api.pexels.com/v1/search?query=$keyword&per_page=1&page=$i" \
+                -H "Authorization: ${{ secrets.PEXELS_API_KEY }}" | jq -r '.photos[0].src.large')
+              if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+                wget -q -O "media_bank/images/${keyword}_${i}.jpg" "$URL"
+              fi
+            done
           done
 
+      # =============================
+      # PIXABAY - DOWNLOAD VIDEOS
+      # =============================
       - name: Download videos from Pixabay
         run: |
-          for i in $(seq 1 100); do
-            URL=$(curl -s "https://pixabay.com/api/videos/?key=${{ secrets.PIXABAY_API_KEY }}&q=${{ github.event.inputs.theme }}&per_page=1&page=$i" \
-              | jq -r '.hits[0].videos.medium.url')
-            wget -q -O "media_bank/videos/${i}.mp4" "$URL"
+          for keyword in $(echo "${{ github.event.inputs.theme }}" | tr ',' ' '); do
+            echo "Downloading videos for theme: $keyword"
+            for i in $(seq 1 20); do
+              URL=$(curl -s "https://pixabay.com/api/videos/?key=${{ secrets.PIXABAY_API_KEY }}&q=$keyword&per_page=1&page=$i" \
+                | jq -r '.hits[0].videos.medium.url')
+              if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+                wget -q -O "media_bank/videos/${keyword}_${i}.mp4" "$URL"
+              fi
+            done
           done
 
+      # =============================
+      # UPLOAD MEDIA BANK
+      # =============================
       - name: Upload media bank artifact
         uses: actions/upload-artifact@v4
         with:
