@@ -1,107 +1,139 @@
 ﻿name: Render Video
 
 on:
-  workflow_dispatch:
   workflow_call:
+    inputs:
+      images_zip:
+        description: "Archive des images (ZIP)"
+        required: false
+        type: string
+        default: outputs/images.zip
+      audio_path:
+        description: "Chemin du fichier audio (mp3/wav)"
+        required: false
+        type: string
+        default: work/audio.mp3
+      min_duration_sec:
+        description: "Durée minimale de la vidéo (s)"
+        required: false
+        type: number
+        default: 65
+      target_res:
+        description: "Résolution cible LxH (ex 720x1280)"
+        required: false
+        type: string
+        default: 720x1280
+      fps:
+        description: "Images/seconde"
+        required: false
+        type: number
+        default: 25
+    outputs:
+      final_video:
+        description: "Chemin de la vidéo rendue"
+        value: ${{ jobs.render.outputs.final_video }}
 
 jobs:
   render:
     runs-on: ubuntu-latest
+    outputs:
+      final_video: ${{ steps.set_out.outputs.final_video }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Installer FFmpeg
+      - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Préparer les dossiers
+      - name: Prepare folders
         run: |
           set -euo pipefail
           mkdir -p work build outputs
 
-      - name: Décompresser images
+      - name: Unzip images
         run: |
           set -euo pipefail
-          unzip outputs/images.zip -d work/images
+          ZIP="${{ inputs.images_zip }}"
+          if [ ! -f "$ZIP" ]; then
+            echo "Archive d'images introuvable: $ZIP" >&2
+            exit 1
+          fi
+          rm -rf work/images
+          mkdir -p work/images
+          unzip -qq "$ZIP" -d work/images
 
-      - name: Déboguer les fichiers extraits
+      - name: Normalize images to target resolution
         run: |
           set -euo pipefail
-          ls -lh work/images
-
-      - name: Normaliser les images (720x1280)
-        run: |
-          set -euo pipefail
-          for img in work/images/*.png; do
-            ffmpeg -y -i "$img" -vf "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2" "build/$(basename "$img")"
+          RES="${{ inputs.target_res }}"
+          shopt -s nullglob
+          rm -f build/*.png
+          for img in work/images/*.png work/images/*.jpg work/images/*.jpeg; do
+            [ -f "$img" ] || continue
+            base="$(basename "$img")"
+            out="build/${base%.*}.png"
+            ffmpeg -y -i "$img" \
+              -vf "scale=${RES}:force_original_aspect_ratio=decrease,pad=${RES}:(ow-iw)/2:(oh-ih)/2" \
+              "$out"
           done
-
-      - name: Déboguer images normalisées
-        run: |
-          set -euo pipefail
+          echo "== DEBUG images normalisées =="
           ls -lh build
 
-      - name: Générer filelist.txt
-        id: filelist
+      - name: Build filelist for concat
+        id: list
         run: |
           set -euo pipefail
-          IMAGE_COUNT=$(ls build/*.png | wc -l)
-          AUDIO_FILE="work/audio.mp3"
-          
-          # Vérification existence audio
-          if [ ! -f "$AUDIO_FILE" ]; then
-            echo "Erreur: Le fichier audio $AUDIO_FILE est introuvable."
+          AUDIO="${{ inputs.audio_path }}"
+          if [ ! -f "$AUDIO" ]; then
+            echo "Fichier audio introuvable: $AUDIO" >&2
             exit 1
           fi
 
-          # Durée audio
-          AUDIO_DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$AUDIO_FILE" | awk '{print int($1)}')
-          
-          # Durée cible minimum TikTok = 65s
-          TARGET_DURATION=65
-          if [[ "$AUDIO_DURATION" -gt "$TARGET_DURATION" ]]; then
-            TARGET_DURATION=$AUDIO_DURATION
+          IMAGE_COUNT=$(ls build/*.png 2>/dev/null | wc -l)
+          if [ "$IMAGE_COUNT" -eq 0 ]; then
+            echo "Aucune image dans build/" >&2
+            exit 1
           fi
 
-          echo "Durée audio=$AUDIO_DURATION, cible=$TARGET_DURATION"
+          AUDIO_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$AUDIO" | awk '{print int($1)}')
+          TARGET=${{ inputs.min_duration_sec }}
+          if [ "$AUDIO_DUR" -gt "$TARGET" ]; then TARGET="$AUDIO_DUR"; fi
+          echo "Durée audio=${AUDIO_DUR}s, cible=${TARGET}s"
 
-          # Durée par image
-          DURATION_PER_IMAGE=$(awk "BEGIN {print $TARGET_DURATION / $IMAGE_COUNT}")
-          echo "Durée par image=$DURATION_PER_IMAGE (N=$IMAGE_COUNT)"
+          DURATION_PER_IMAGE=$(awk "BEGIN {printf \"%.2f\", $TARGET / $IMAGE_COUNT}")
 
           FILELIST="build/filelist.txt"
-          : > "$FILELIST"   # CORRECTION ShellCheck
-
+          : > "$FILELIST"
           for img in $(ls build/*.png | sort); do
-            echo "file '$PWD/$img'" >> "$FILELIST"
+            echo "file '$(readlink -f "$img")'" >> "$FILELIST"
             echo "duration $DURATION_PER_IMAGE" >> "$FILELIST"
           done
-
-          # Dernière image répétée pour éviter coupure
-          LAST_IMG=$(ls build/*.png | sort | tail -n 1)
-          echo "file '$PWD/$LAST_IMG'" >> "$FILELIST"
+          LAST=$(ls build/*.png | sort | tail -n 1)
+          echo "file '$(readlink -f "$LAST")'" >> "$FILELIST"
 
           echo "filelist_path=$FILELIST" >> "$GITHUB_OUTPUT"
+          echo "audio_path=$AUDIO" >> "$GITHUB_OUTPUT"
 
-          echo "=== filelist.txt ==="
-          cat "$FILELIST"
-
-      - name: Générer vidéo finale
+      - name: Render slideshow + audio
         run: |
           set -euo pipefail
-          FILELIST="${{ steps.filelist.outputs.filelist_path }}"
-          AUDIO_FILE="work/audio.mp3"
-          OUTPUT="outputs/final.mp4"
+          FILELIST="${{ steps.list.outputs.filelist_path }}"
+          AUDIO="${{ steps.list.outputs.audio_path }}"
+          FPS="${{ inputs.fps }}"
+          OUT="outputs/final.mp4"
 
-          echo "Début du rendu vidéo avec FFmpeg..."
-          ffmpeg -y -f concat -safe 0 -i "$FILELIST" -i "$AUDIO_FILE" \
-            -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$OUTPUT"
+          ffmpeg -y -f concat -safe 0 -i "$FILELIST" \
+                 -i "$AUDIO" -r "$FPS" \
+                 -c:v libx264 -pix_fmt yuv420p -c:a aac \
+                 -shortest "$OUT"
 
-          echo "Vidéo finale générée : $OUTPUT"
+      - name: Set output path
+        id: set_out
+        run: echo "final_video=outputs/final.mp4" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artefact
-        uses: actions/upload-artifact@v3
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: final-video
           path: outputs/final.mp4
