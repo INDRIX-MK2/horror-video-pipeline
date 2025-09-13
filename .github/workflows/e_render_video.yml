@@ -49,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Artifacts requis
+      # === Récupération des artifacts produits en amont ===
       - name: Télécharger images (dossier)
         uses: actions/download-artifact@v4
         with:
@@ -68,7 +68,7 @@ jobs:
           name: subtitles_srt
           path: outputs
 
-      # (Optionnel) Télécharger musique si fournie
+      # (Optionnel) Télécharger musique si une URL est fournie
       - name: Télécharger musique (optionnel)
         if: ${{ inputs.music_url != '' }}
         run: |
@@ -77,26 +77,31 @@ jobs:
           curl -L --fail -o outputs/music.mp3 "${{ inputs.music_url }}"
 
       - name: Installer FFmpeg + outils
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg coreutils jq findutils
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg coreutils findutils jq
 
       - name: Vérifier médias
+        env:
+          VOICE: ${{ inputs.voice_path }}
+          SRT:   ${{ inputs.captions_path }}
         run: |
           echo "== IMAGES ==" && find work/images -maxdepth 1 -type f | sort || true
-          echo "== VOIX ==" && ls -l outputs/voice.mp3
-          echo "== SRT ==" && ls -l outputs/subtitles.srt || true
+          echo "== VOIX ==" && ls -l "${VOICE:-outputs/voice.mp3}" || ls -l outputs/voice.mp3
+          echo "== SRT ==" && ls -l "${SRT:-outputs/subtitles.srt}" || true
           [ -f outputs/music.mp3 ] && echo "== MUSIC ==" && ls -l outputs/music.mp3 || true
 
+      # === Construction du slideshow 9:16 avec durée cible et FPS constant ===
       - name: Construire slideshow 9:16 à la bonne durée (corrigé)
         env:
           RES:  ${{ inputs.target_res }}
           FPS:  ${{ inputs.fps }}
           MIN:  ${{ inputs.min_duration_sec }}
           MAX:  ${{ inputs.max_duration_sec }}
+          VOICE: ${{ inputs.voice_path }}
         run: |
           set -euo pipefail
           mkdir -p work build outputs
 
-          # Parse résolution
+          # Parse résolution (ex: 720x1280)
           W="${RES%x*}"; H="${RES#*x}"
 
           # Lister images source
@@ -110,15 +115,17 @@ jobs:
           for f in "${SRC[@]}"; do
             i=$((i+1))
             printf -v OUT "build/%04d.png" "$i"
-            # -frames:v 1 -update 1 pour éviter l'erreur image2 sur certains builds
-            ffmpeg -y -i "$f" -vf "scale='if(gt(a,$W/$H),$W,-1)':'if(gt(a,$W/$H),-1,$H)',pad=$W:$H:(ow-iw)/2:(oh-ih)/2" -frames:v 1 -update 1 "$OUT"
+            ffmpeg -y -i "$f" \
+              -vf "scale='if(gt(a,$W/$H),$W,-1)':'if(gt(a,$W/$H),-1,$H)',pad=$W:$H:(ow-iw)/2:(oh-ih)/2" \
+              -frames:v 1 -update 1 "$OUT"
           done
 
-          echo "== DEBUG images normalisées ==" && ls -l build | sed -n '1,20p'
+          echo "== DEBUG images normalisées ==" && ls -l build | sed -n '1,40p'
 
-          # Durée audio -> cible de durée
-          if [ -f "outputs/voice.mp3" ]; then
-            ASEC=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "outputs/voice.mp3" | awk '{printf("%.0f",$1)}')
+          # Durée audio -> cible (entre MIN et MAX)
+          VOICE_PATH="${VOICE:-outputs/voice.mp3}"
+          if [ -f "$VOICE_PATH" ]; then
+            ASEC=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "$VOICE_PATH" | awk '{printf("%.0f",$1)}')
           else
             ASEC=0
           fi
@@ -129,13 +136,13 @@ jobs:
           if [ "$TGT" -gt "$MAX" ]; then TGT="$MAX"; fi
           echo "Durée audio=${ASEC}s, cible=${TGT}s"
 
-          # Durée par image
+          # Durée par image (bornée 1.5s..5s)
           N=$(ls build/*.png | wc -l)
           if [ "$N" -lt 1 ]; then echo "Pas d'images normalisées dans build/"; exit 1; fi
           per=$(awk -v T="$TGT" -v N="$N" 'BEGIN{d=T/N; if(d<1.5)d=1.5; if(d>5)d=5; printf("%.2f",d)}')
           echo "Durée par image=${per}s (N=${N})"
 
-          # filelist avec chemins ABSOLUS (évite build/build/xxx.png)
+          # filelist avec chemins ABSOLUS (évite toute ambiguïté)
           FL="build/filelist.txt"
           : > "$FL"
           find "$(pwd)/build" -maxdepth 1 -type f -name "*.png" | sort | while read -r f; do
@@ -146,12 +153,12 @@ jobs:
           echo "file '$last'" >> "$FL"
 
           echo "=== filelist.txt ==="
-          sed -n '1,30p' "$FL"
+          sed -n '1,60p' "$FL"
 
-          # Construire le slideshow
-          ffmpeg -y -f concat -safe 0 -i "$FL" -vsync vfr -pix_fmt yuv420p -r "$FPS" "work/slideshow.mp4"
+          # Slideshow avec CFR: -fps_mode cfr (ne pas utiliser -vsync vfr)
+          ffmpeg -y -f concat -safe 0 -fps_mode cfr -i "$FL" -pix_fmt yuv420p -r "$FPS" "work/slideshow.mp4"
 
-          # Adapter à la durée cible (padding/troncature)
+          # Adapter à la durée cible (padding troncature)
           CUR=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "work/slideshow.mp4")
           needpad=$(awk -v cur="$CUR" -v tgt="$TGT" 'BEGIN{if(cur<tgt)print 1; else print 0}')
           if [ "$needpad" -eq 1 ]; then
@@ -162,26 +169,34 @@ jobs:
           ffmpeg -y -i work/slideshow.mp4 -t "$TGT" -c:v libx264 -pix_fmt yuv420p work/slideshow_trim.mp4
           mv work/slideshow_trim.mp4 work/slideshow.mp4
 
-      - name: Mixer audio (voix + musique optionnelle)
+      # === Mix audio (voix + musique optionnelle) ===
+      - name: Mixer audio
+        env:
+          VOICE: ${{ inputs.voice_path }}
         run: |
           set -euo pipefail
+          VOICE_PATH="${VOICE:-outputs/voice.mp3}"
           if [ -f "outputs/music.mp3" ]; then
-            ffmpeg -y -i work/slideshow.mp4 -i outputs/voice.mp3 -i outputs/music.mp3 \
+            # Voix 1.0, musique 0.25
+            ffmpeg -y -i work/slideshow.mp4 -i "$VOICE_PATH" -i outputs/music.mp3 \
               -filter_complex "[1:a]volume=1.0[a1];[2:a]volume=0.25[a2];[a1][a2]amix=inputs=2:normalize=0[aout]" \
               -map 0:v -map "[aout]" -c:v copy -c:a aac -shortest work/with_audio.mp4
           else
-            ffmpeg -y -i work/slideshow.mp4 -i outputs/voice.mp3 -map 0:v -map 1:a -c:v copy -c:a aac -shortest work/with_audio.mp4
+            ffmpeg -y -i work/slideshow.mp4 -i "$VOICE_PATH" -map 0:v -map 1:a -c:v copy -c:a aac -shortest work/with_audio.mp4
           fi
 
+      # === Sous-titres stylés (si présents) ===
       - name: Appliquer sous-titres stylés
         env:
-          FS: ${{ inputs.subtitles_fontsize }}
-          MV: ${{ inputs.subtitles_margin_v }}
+          FS:  ${{ inputs.subtitles_fontsize }}
+          MV:  ${{ inputs.subtitles_margin_v }}
+          SRT: ${{ inputs.captions_path }}
         run: |
           set -euo pipefail
-          if [ -f "outputs/subtitles.srt" ]; then
+          SRT_PATH="${SRT:-outputs/subtitles.srt}"
+          if [ -f "$SRT_PATH" ]; then
             ffmpeg -y -i work/with_audio.mp4 \
-              -vf "subtitles=outputs/subtitles.srt:force_style='Fontname=DejaVu Sans,Fontsize=${FS},Outline=2,Shadow=1,Alignment=5,MarginV=${MV}'" \
+              -vf "subtitles='${SRT_PATH}':force_style='Fontname=DejaVu Sans,Fontsize=${FS},Outline=2,Shadow=1,Alignment=5,MarginV=${MV}'" \
               -c:a copy outputs/final.mp4
           else
             echo "Aucun SRT trouvé, sortie sans sous-titres"
