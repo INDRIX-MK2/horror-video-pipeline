@@ -3,114 +3,57 @@
 on:
   workflow_dispatch:
     inputs:
-      locale:
-        description: "Langue"
+      images_zip:
+        description: "Archive d'images (.zip)"
         required: true
-        default: "fr-FR"
-        type: choice
-        options: [fr-FR, en-US]
-
-      topic:
-        description: "Sujet / Thème de l'histoire"
-        required: true
-        default: "légende urbaine"
         type: string
+        default: outputs/images.zip
 
-      query:
-        description: "Requête images"
+      audio_path:
+        description: "Fichier audio voix/musique"
         required: true
-        default: "urban legend night street"
         type: string
+        default: work/audio.mp3
 
-      voice_id:
-        description: "ID de voix TTS"
-        required: true
-        default: "fr-FR-Standard-A"
+      captions_path:
+        description: "Sous-titres (SRT/ASS) à graver"
+        required: false
         type: string
+        default: ""
 
-      video_config:
-        description: "Config vidéo (JSON)"
-        required: true
-        default: '{"target_res":"720x1280","fps":30,"min_duration_sec":65,"max_duration_sec":75,"mute_stock_clips":true,"subtitles_fontsize":60,"subtitles_margin_v":220}'
+      min_duration_sec:
+        description: "Durée minimale cible (s)"
+        required: false
+        type: number
+        default: 65
+
+      max_duration_sec:
+        description: "Durée maximale (s) — 0 = illimité"
+        required: false
+        type: number
+        default: 0
+
+      target_res:
+        description: "Résolution cible (LxH)"
+        required: false
         type: string
+        default: 720x1280
 
-permissions:
-  contents: read
-  actions: write
-
-concurrency:
-  group: orchestrator-${{ github.ref }}
-  cancel-in-progress: false
+      fps:
+        description: "Images par seconde"
+        required: false
+        type: number
+        default: 25
 
 jobs:
-  a_prompt:
-    name: Générer le prompt
-    uses: ./.github/workflows/a_prompt.yml
-    secrets: inherit
-    with:
-      locale: ${{ github.event.inputs.locale }}
-      topic:  ${{ github.event.inputs.topic }}
-
-  b_voiceover:
-    name: Générer la voix off
-    needs: a_prompt
-    uses: ./.github/workflows/b_voiceover.yml
-    secrets: inherit
-    with:
-      voice_id:    ${{ github.event.inputs.voice_id }}
-      script_path: ${{ needs.a_prompt.outputs.script_path }}
-
-  c_fetch_images:
-    name: Récupérer les images
-    needs: a_prompt
-    uses: ./.github/workflows/c_fetch_images.yml
-    secrets: inherit
-    with:
-      query:      ${{ github.event.inputs.query }}
-      target_res: ${{ fromJSON(github.event.inputs.video_config).target_res }}
-
-  d_generate_subtitles:
-    name: Générer les sous-titres
-    needs: a_prompt
-    uses: ./.github/workflows/d_generate_subtitles.yml
-    secrets: inherit
-    with:
-      script_path:        ${{ needs.a_prompt.outputs.script_path }}
-      subtitles_fontsize: ${{ fromJSON(github.event.inputs.video_config).subtitles_fontsize }}
-      subtitles_margin_v: ${{ fromJSON(github.event.inputs.video_config).subtitles_margin_v }}
-
-  e_render_video:
-    name: Composer la vidéo
-    needs: [c_fetch_images, d_generate_subtitles, b_voiceover]
+  render_video:
+    name: Render Video
     uses: ./.github/workflows/e_render_video.yml
-    secrets: inherit
     with:
-      target_res:         ${{ fromJSON(github.event.inputs.video_config).target_res }}
-      fps:                ${{ fromJSON(github.event.inputs.video_config).fps }}
-      min_duration_sec:   ${{ fromJSON(github.event.inputs.video_config).min_duration_sec }}
-      max_duration_sec:   ${{ fromJSON(github.event.inputs.video_config).max_duration_sec }}
-      captions_path:      ${{ needs.d_generate_subtitles.outputs.captions_path }}
-      voice_path:         ${{ needs.b_voiceover.outputs.voice_path }}
-      mute_stock_clips:   ${{ fromJSON(github.event.inputs.video_config).mute_stock_clips }}
-      subtitles_fontsize: ${{ fromJSON(github.event.inputs.video_config).subtitles_fontsize }}
-      subtitles_margin_v: ${{ fromJSON(github.event.inputs.video_config).subtitles_margin_v }}
-
-  f_publish_discord:
-    name: Publier sur Discord
-    needs: e_render_video
-    uses: ./.github/workflows/f_publish_discord.yml
-    secrets: inherit
-    with:
-      locale:     ${{ github.event.inputs.locale }}
-      video_path: ${{ needs.e_render_video.outputs.video_path }}
-
-  g_build_media_bank:
-    name: Archiver la production
-    needs: [e_render_video, d_generate_subtitles, b_voiceover]
-    uses: ./.github/workflows/g_build_media_bank.yml
-    secrets: inherit
-    with:
-      query:         ${{ github.event.inputs.query }}
-      video_path:    ${{ needs.e_render_video.outputs.video_path }}
-      captions_path: ${{ needs.d_generate_subtitles.outputs.captions_path }}
-      voice_path:    ${{ needs.b_voiceover.outputs.voice_path }}
+      images_zip: ${{ inputs.images_zip }}
+      audio_path: ${{ inputs.audio_path }}
+      captions_path: ${{ inputs.captions_path }}
+      min_duration_sec: ${{ inputs.min_duration_sec }}
+      max_duration_sec: ${{ inputs.max_duration_sec }}
+      target_res: ${{ inputs.target_res }}
+      fps: ${{ inputs.fps }}
