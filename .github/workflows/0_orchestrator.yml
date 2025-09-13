@@ -8,37 +8,31 @@ on:
         required: true
         type: string
         default: outputs/images.zip
-
       audio_path:
         description: "Fichier audio voix/musique"
         required: true
         type: string
         default: work/audio.mp3
-
       captions_path:
-        description: "Sous-titres (SRT/ASS) à graver"
+        description: "Sous-titres (SRT/ASS) à graver (optionnel)"
         required: false
         type: string
         default: ""
-
       min_duration_sec:
         description: "Durée minimale cible (s)"
         required: false
         type: number
         default: 65
-
       max_duration_sec:
         description: "Durée maximale (s) — 0 = illimité"
         required: false
         type: number
         default: 0
-
       target_res:
         description: "Résolution cible (LxH)"
         required: false
         type: string
         default: 720x1280
-
       fps:
         description: "Images par seconde"
         required: false
