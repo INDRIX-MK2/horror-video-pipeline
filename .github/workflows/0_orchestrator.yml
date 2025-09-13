@@ -1,282 +1,141 @@
-﻿name: 0 - Full Pipeline Orchestrator
+﻿name: orchestrator
 
 on:
   workflow_dispatch:
     inputs:
       theme:
-        description: "Thème de l'histoire et de la banque média"
+        description: "Thème (mots-clés séparés par des virgules)"
         required: true
-        default: "Horreur"
-      selection_count:
-        description: "Nombre d'images et de mini-clips à sélectionner"
+        default: "horror, dark alley, haunted house"
+      use_mediabank:
+        description: "Utiliser l'artifact media_bank (true/false)"
         required: true
-        default: "12"
-      fill_mediabank:
-        description: "Remplir/actualiser la banque média avant (true/false)"
+        default: "true"
+      target_duration_s:
+        description: "Durée cible (s) — sert à répartir les images"
         required: true
-        default: "false"
-      publish_to_discord:
-        description: "Publier sur Discord à la fin (true/false)"
-        required: true
-        default: "false"
+        default: "60"
 
 jobs:
-
-  build_mediabank:
-    if: ${{ github.event.inputs.fill_mediabank == 'true' }}
+  render_orchestrated:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create folders
-        run: |
-          mkdir -p media_bank/images
-          mkdir -p media_bank/videos
-      - name: Download images from Pexels (100)
-        env:
-          THEME: ${{ github.event.inputs.theme }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        run: |
-          i=1
-          while [ $i -le 100 ]; do
-            URL=$(curl -s "https://api.pexels.com/v1/search?query=${THEME}&per_page=1&page=${i}" \
-              -H "Authorization: ${PEXELS_API_KEY}" | jq -r '.photos[0].src.original')
-            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-              curl -sL "$URL" -o "media_bank/images/${i}.jpg"
-            fi
-            i=$((i+1))
-          done
-      - name: Download videos from Pixabay (100)
-        env:
-          THEME: ${{ github.event.inputs.theme }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        run: |
-          i=1
-          while [ $i -le 100 ]; do
-            URL=$(curl -s "https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${THEME}&per_page=1&page=${i}" \
-              | jq -r '.hits[0].videos.medium.url')
-            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-              curl -sL "$URL" -o "media_bank/videos/${i}.mp4"
-            fi
-            i=$((i+1))
-          done
-      - name: Upload Media Bank
-        uses: actions/upload-artifact@v4
-        with:
-          name: media_bank
-          path: media_bank
 
-  generate_prompt:
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Generate story (OpenAI)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          THEME: ${{ github.event.inputs.theme }}
-        run: |
-          mkdir -p outputs
-          BODY='{"model":"gpt-5-mini","temperature":1,"messages":[{"role":"system","content":"Tu es un créateur d\'histoires TikTok d\'horreur. Génère une histoire de 180 à 200 mots, captivante, avec un twist final."},{"role":"user","content":"'"${THEME}"'"}]}'
-          STORY=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "${BODY}" | jq -r '.choices[0].message.content')
-          printf "%s\n" "$STORY" > outputs/story.txt
-          nl -ba outputs/story.txt | sed -n '1,5p'
-      - name: Upload story
-        uses: actions/upload-artifact@v4
-        with:
-          name: story
-          path: outputs/story.txt
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  fetch_media:
-    runs-on: ubuntu-latest
-    needs: [build_mediabank]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Get Media Bank (if exists)
-        uses: actions/download-artifact@v4
-        with:
-          name: media_bank
-          path: media_bank
-        continue-on-error: true
-      - name: Ensure Media Bank folders
-        run: |
-          mkdir -p media_bank/images
-          mkdir -p media_bank/videos
-      - name: Select random media
-        env:
-          COUNT: ${{ github.event.inputs.selection_count }}
-        run: |
-          mkdir -p outputs/images outputs/videos
-          IMGS=$(ls -1 media_bank/images 2>/dev/null | wc -l)
-          VIDS=$(ls -1 media_bank/videos 2>/dev/null | wc -l)
-          if [ "$IMGS" -eq 0 ] || [ "$VIDS" -eq 0 ]; then
-            echo "Media Bank vide. Lance d'abord fill_mediabank=true." >&2
-            exit 1
-          fi
-          ls media_bank/images/* | shuf | head -n "${COUNT}" | xargs -I{} cp "{}" outputs/images/
-          ls media_bank/videos/* | shuf | head -n "${COUNT}" | xargs -I{} cp "{}" outputs/videos/
-          echo "Selected:"
-          ls -1 outputs/images | head -n 3
-          ls -1 outputs/videos | head -n 3
-      - name: Upload selected media
-        uses: actions/upload-artifact@v4
-        with:
-          name: selected_media
-          path: outputs
-
-  voiceover:
-    runs-on: ubuntu-latest
-    needs: [generate_prompt]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download story
-        uses: actions/download-artifact@v4
-        with:
-          name: story
-          path: work
-      - name: Generate voice (ElevenLabs)
-        env:
-          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
-        run: |
-          mkdir -p outputs
-          TEXT_JSON=$(jq -Rs . < work/story.txt)
-          DATA='{"text":'"${TEXT_JSON}"',"voice_settings":{"stability":0.75,"similarity_boost":0.85}}'
-          curl -s -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
-            -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "${DATA}" --output outputs/voice.mp3
-          file outputs/voice.mp3
-      - name: Upload voice
-        uses: actions/upload-artifact@v4
-        with:
-          name: voice
-          path: outputs/voice.mp3
-
-  subtitles:
-    runs-on: ubuntu-latest
-    needs: [generate_prompt]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download story
-        uses: actions/download-artifact@v4
-        with:
-          name: story
-          path: work
-      - name: Build SRT and ASS (karaoké style, font 20)
-        run: |
-          mkdir -p outputs
-          # SRT (00-20s)
-          printf "1\n00:00:00,000 --> 00:00:20,000\n" > outputs/captions.srt
-          cat work/story.txt >> outputs/captions.srt
-          printf "\n" >> outputs/captions.srt
-          # ASS (style jaune, taille 20) - effet karaoké global simple
-          printf "[Script Info]\n" > outputs/captions.ass
-          printf "ScriptType: v4.00+\n" >> outputs/captions.ass
-          printf "[V4+ Styles]\n" >> outputs/captions.ass
-          printf "Format: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n" >> outputs/captions.ass
-          # PrimaryColour &H00FFFF00 (jaune), Outline noir, taille 20
-          printf "Style: Default,DejaVu Sans,20,&H00FFFF00,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,28,0\n" >> outputs/captions.ass
-          printf "[Events]\n" >> outputs/captions.ass
-          printf "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n" >> outputs/captions.ass
-          ESCAPED=$(sed 's/{/\\{/g; s/}/\\}/g' work/story.txt | tr '\n' ' ')
-          printf "Dialogue: 0,0:00:00.00,0:00:20.00,Default,,0,0,0,karaoke,{\\k20}%s\n" "$ESCAPED" >> outputs/captions.ass
-          head -n 20 outputs/captions.ass
-      - name: Upload subtitles
-        uses: actions/upload-artifact@v4
-        with:
-          name: subtitles
-          path: outputs
-
-  render:
-    runs-on: ubuntu-latest
-    needs: [fetch_media, voiceover, subtitles]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download selected media
-        uses: actions/download-artifact@v4
-        with:
-          name: selected_media
-          path: work
-      - name: Download voice
-        uses: actions/download-artifact@v4
-        with:
-          name: voice
-          path: work
-      - name: Download subtitles
-        uses: actions/download-artifact@v4
-        with:
-          name: subtitles
-          path: work
-      - name: Render slideshow with crossfades + blurred video background + subtitles
+      - name: Tools
         run: |
           set -euo pipefail
-          mkdir -p outputs tmp
-          # 1) Crée des segments 5s par image (720x1280, pad centré) @30fps
-          n=0
-          for img in $(ls -1 work/images/* | sort); do
+          sudo apt-get update -y
+          sudo apt-get install -y jq ffmpeg wget unzip
+
+      - name: Prepare folders
+        run: |
+          set -euo pipefail
+          mkdir -p work build outputs
+          mkdir -p work/images work/videos
+
+      - name: Download media bank (if requested)
+        if: ${{ github.event.inputs.use_mediabank == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: media_bank
+          path: work
+
+      # Sélectionne jusqu'à 12 assets (vidéos d'abord, puis images)
+      - name: Select up to 12 assets (videos+images)
+        run: |
+          set -euo pipefail
+          IM_DIR="work/media_bank/images"
+          VI_DIR="work/media_bank/videos"
+          mkdir -p "$IM_DIR" "$VI_DIR"
+
+          find "$VI_DIR" -type f -name "*.mp4" | sort > work/_all_videos.txt || true
+          find "$IM_DIR" -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" \) | sort > work/_all_images.txt || true
+
+          head -n 12 work/_all_videos.txt > work/_take_videos.txt || true
+          VCOUNT=$(wc -l < work/_take_videos.txt || echo 0)
+          RESTE=$((12 - VCOUNT))
+          if [ "$RESTE" -gt 0 ]; then
+            head -n "$RESTE" work/_all_images.txt > work/_take_images.txt || true
+          else
+            > work/_take_images.txt
+          fi
+
+          > work/_selected.txt
+          cat work/_take_videos.txt >> work/_selected.txt
+          cat work/_take_images.txt >> work/_selected.txt
+
+          n=1
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            bn=$(printf "%04d" "$n")
+            ext="${f##*.}"
+            out="build/${bn}.${ext}"
+            cp -f "$f" "$out"
             n=$((n+1))
-            tag=$(printf "%03d" "$n")
-            ffmpeg -y -loop 1 -t 5 -i "$img" \
-              -vf "scale=720:-2:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2" \
-              -r 30 -an "tmp/seg_${tag}.mp4"
+          done < work/_selected.txt
+
+          ls -l build || true
+
+      - name: Normalize images to PNG 720x1280
+        run: |
+          set -euo pipefail
+          for src in build/*; do
+            [ -e "$src" ] || continue
+            case "${src##*.}" in
+              jpg|jpeg|png|JPG|JPEG|PNG)
+                base="${src%.*}"
+                ffmpeg -y -loglevel error -i "$src" -vf "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2" "build/${base##*/}.png"
+                ;;
+              mp4|MP4)
+                # on garde les mp4 tels quels
+                :
+                ;;
+              *)
+                :
+                ;;
+            esac
           done
-          # 2) Chaîne les segments avec xfade (1s) => slideshow.mp4
-          SEG_FIRST=$(ls -1 tmp/seg_*.mp4 | head -n 1)
-          OUT="$SEG_FIRST"
-          for next in $(ls -1 tmp/seg_*.mp4 | tail -n +2); do
-            ffmpeg -y -i "$OUT" -i "$next" \
-              -filter_complex "xfade=transition=fade:duration=1:offset=4,format=yuv420p" \
-              -c:v libx264 -pix_fmt yuv420p "tmp/xfade_tmp.mp4"
-            OUT="tmp/xfade_tmp.mp4"
+
+      - name: Compute per-image duration and create filelist
+        env:
+          TARGET: ${{ github.event.inputs.target_duration_s }}
+        run: |
+          set -euo pipefail
+          N=$(ls build/*.png 2>/dev/null | wc -l || true)
+          if [ "$N" -eq 0 ]; then
+            echo "Aucune image PNG dans build/. Assure-toi que la MediaBank contient des images." >&2
+            exit 1
+          fi
+
+          PER=$(awk -v t="$TARGET" -v n="$N" 'BEGIN { if (n>0) printf("%.2f", t/n); else printf("5.00"); }')
+          echo "Durée par image = $PER s (N=$N, cible=$TARGET s)"
+
+          FILELIST="build/filelist.txt"
+          > "$FILELIST"
+          for img in $(ls build/*.png | sort); do
+            printf "file '%s'\n" "$img" >> "$FILELIST"
+            printf "duration %s\n" "$PER" >> "$FILELIST"
           done
-          mv "$OUT" tmp/slideshow.mp4
-          # 3) Concatène quelques mini-clips pour un fond > durée du slideshow
-          ls -1 work/videos/*.mp4 | shuf | head -n 10 > tmp/bg_list.txt
-          awk '{printf "file \x27%s\x27\n",$0}' tmp/bg_list.txt > tmp/bg_concat.txt
-          ffmpeg -y -f concat -safe 0 -i tmp/bg_concat.txt \
-            -filter:v "scale=720:1280:force_original_aspect_ratio=cover,boxblur=20:1" \
-            -an -c:v libx264 -pix_fmt yuv420p -t 120 tmp/bg_long.mp4
-          # 4) Overlay slideshow sur le fond + sous-titres ASS + mix voix
-          #    (on applique les subs après overlay pour qu'ils soient au-dessus)
-          ffmpeg -y -i tmp/bg_long.mp4 -i tmp/slideshow.mp4 -i work/voice.mp3 \
-            -filter_complex "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:format=auto[v0];[v0]subtitles=work/captions.ass[v]" \
-            -map "[v]" -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest outputs/final.mp4
-          echo "Final duration:"
-          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 outputs/final.mp4
-      - name: Upload final video
+          LAST_IMG=$(ls build/*.png | sort | tail -n 1)
+          printf "file '%s'\n" "$LAST_IMG" >> "$FILELIST"
+
+          echo "=== filelist.txt ==="
+          cat "$FILELIST"
+
+      - name: Build slideshow (images only)
+        run: |
+          set -euo pipefail
+          ffmpeg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t 1 -y -loglevel error outputs/silence.wav
+          ffmpeg -safe 0 -f concat -i build/filelist.txt -i outputs/silence.wav -shortest -r 25 -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart -y work/slideshow.mp4
+
+      - name: Upload intermediate artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: final_video
-          path: outputs/final.mp4
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: [render]
-    if: ${{ github.event.inputs.publish_to_discord == 'true' }}
-    steps:
-      - name: Download final video
-        uses: actions/download-artifact@v4
-        with:
-          name: final_video
-          path: work
-      - name: Publish to Discord
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          curl -s -F "payload_json={\"content\":\"🎬 Nouvelle vidéo générée.\"}" \
-               -F "file=@work/final.mp4" \
-               "${DISCORD_WEBHOOK_URL}"
-
-  debug_artifacts:
-    runs-on: ubuntu-latest
-    needs: [render]
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: debug
-      - name: Tree debug
-        run: |
-          ls -R debug | sed -n '1,200p'
+          name: orchestrator_outputs
+          path: |
+            build/filelist.txt
+            work/slideshow.mp4
+            outputs/silence.wav

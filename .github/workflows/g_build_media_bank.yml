@@ -3,18 +3,22 @@ name: build_mediabank
 on:
   workflow_dispatch:
     inputs:
-      theme:
-        description: "Theme for media search (comma separated)"
+      fill_mediabank:
+        description: "Remplir la banque média (true/false)"
         required: true
-        default: "horror, dark alley, haunted house, creepy forest, ghost"
+        default: "true"
+      theme:
+        description: "Mot-clé ou liste de mots-clés séparés par des virgules"
+        required: true
+        default: "horror, dark alley, haunted house"
 
 jobs:
   build_mediabank:
+    if: ${{ github.event.inputs.fill_mediabank == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq wget
@@ -25,15 +29,18 @@ jobs:
           mkdir -p media_bank/videos
 
       # =============================
-      # PEXELS - DOWNLOAD IMAGES
+      # PEXELS - IMAGES
       # =============================
-      - name: Download images from Pexels
+      - name: Download images from Pexels (100)
+        env:
+          THEME: ${{ github.event.inputs.theme }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
-          for keyword in $(echo "${{ github.event.inputs.theme }}" | tr ',' ' '); do
-            echo "Downloading images for theme: $keyword"
+          for keyword in $(echo "$THEME" | tr ',' ' '); do
+            echo "Téléchargement d'images pour: $keyword"
             for i in $(seq 1 20); do
               URL=$(curl -s "https://api.pexels.com/v1/search?query=$keyword&per_page=1&page=$i" \
-                -H "Authorization: ${{ secrets.PEXELS_API_KEY }}" | jq -r '.photos[0].src.large')
+                -H "Authorization: $PEXELS_API_KEY" | jq -r '.photos[0].src.large')
               if [ -n "$URL" ] && [ "$URL" != "null" ]; then
                 wget -q -O "media_bank/images/${keyword}_${i}.jpg" "$URL"
               fi
@@ -41,14 +48,17 @@ jobs:
           done
 
       # =============================
-      # PIXABAY - DOWNLOAD VIDEOS
+      # PIXABAY - VIDEOS
       # =============================
-      - name: Download videos from Pixabay
+      - name: Download videos from Pixabay (100)
+        env:
+          THEME: ${{ github.event.inputs.theme }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: |
-          for keyword in $(echo "${{ github.event.inputs.theme }}" | tr ',' ' '); do
-            echo "Downloading videos for theme: $keyword"
+          for keyword in $(echo "$THEME" | tr ',' ' '); do
+            echo "Téléchargement de vidéos pour: $keyword"
             for i in $(seq 1 20); do
-              URL=$(curl -s "https://pixabay.com/api/videos/?key=${{ secrets.PIXABAY_API_KEY }}&q=$keyword&per_page=1&page=$i" \
+              URL=$(curl -s "https://pixabay.com/api/videos/?key=$PIXABAY_API_KEY&q=$keyword&per_page=1&page=$i" \
                 | jq -r '.hits[0].videos.medium.url')
               if [ -n "$URL" ] && [ "$URL" != "null" ]; then
                 wget -q -O "media_bank/videos/${keyword}_${i}.mp4" "$URL"
@@ -57,7 +67,7 @@ jobs:
           done
 
       # =============================
-      # UPLOAD MEDIA BANK
+      # UPLOAD
       # =============================
       - name: Upload media bank artifact
         uses: actions/upload-artifact@v4
