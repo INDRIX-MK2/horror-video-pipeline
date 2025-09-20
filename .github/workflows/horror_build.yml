@@ -1,250 +1,182 @@
-﻿name: Horror TikTok Pipeline
+﻿name: Horror TikTok Builder
+
 on:
   workflow_dispatch:
-    inputs:
-      OUT_NAME:
-        description: Nom du MP4 final
-        required: false
-        default: final_horror.mp4
-      CLIPS_COUNT:
-        description: Nombre de segments vidéo
-        required: false
-        default: "13"
-
-permissions:
-  contents: read
-
-concurrency:
-  group: horror-build
-  cancel-in-progress: false
+  schedule:
+    - cron: "0 8 * * *" # chaque jour à 08:00 UTC
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
-      OUT_NAME: ${{ inputs.OUT_NAME }}
-      CLIPS_COUNT: ${{ inputs.CLIPS_COUNT }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
-      ELEVEN_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
-      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      OUT_NAME: final_horror.mp4
+      CLIPS_COUNT: "13"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
+        shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg jq python3 python3-pip
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq curl fonts-dejavu-core
 
-      # =======================
-      # 1) Génération du script avec OpenAI
-      # =======================
-      - name: Generate story
+      - name: Preflight secrets
+        shell: bash
         run: |
           set -euo pipefail
-          test -n "${OPENAI_API_KEY}" || { echo "OPENAI_API_KEY manquant"; exit 1; }
-          mkdir -p story
-          SYS='Tu écris un script court et immersif d'"'"'horreur en français.'"'"
-          USER='Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés.'
+          missing=0
+          for v in OPENAI_API_KEY ELEVENLABS_API_KEY ELEVENLABS_VOICE_ID MANIFEST_URL DISCORD_WEBHOOK_URL; do
+            if [ -z "${!v:-}" ]; then
+              echo "$v manquant"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
 
-          jq -n \
-            --arg sys "$SYS" \
-            --arg user "$USER" \
+      - name: Make directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p selected_media audio story subtitles final_video
+
+      - name: Generate story with OpenAI
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYS="Tu écris un script court et immersif d'horreur en français."
+          USER="Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+          jq -n --arg sys "$SYS" --arg user "$USER" \
             '{model:"gpt-4o-mini",temperature:1,messages:[{role:"system",content:$sys},{role:"user",content:$user}]}' \
             > story/payload.json
-
           curl -sS https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -d @story/payload.json \
-            | jq -r '.choices[0].message.content' | sed 's/\r$//' > story/story.txt
+          | jq -r '.choices[0].message.content' > story/story.txt
+          # Nettoie les lignes vides éventuelles
+          awk 'NF' story/story.txt > story/.t && mv story/.t story/story.txt
 
-          tr '\n' ' ' < story/story.txt | tr -s ' ' > story/story_one_line.txt
-
-      - name: Upload story
-        uses: actions/upload-artifact@v4
-        with:
-          name: story
-          path: story/
-
-      # =======================
-      # 2) Génération de la voix (ElevenLabs) avec fallback
-      # =======================
-      - name: Text-to-Speech (ElevenLabs)
-        if: ${{ env.ELEVEN_API_KEY != '' }}
+      - name: Fetch manifest and re-encode segments (1080x1920/30fps)
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p voice
-          TXT=$(tr '\n' ' ' < story/story_one_line.txt | tr -s ' ')
-
-          jq -n \
-            --arg text "$TXT" \
-            --arg model "eleven_monolingual_v1" \
-            --argjson settings '{"stability":0.45,"similarity_boost":0.75}' \
-            '{
-               text: $text,
-               model_id: $model,
-               voice_settings: $settings
-             }' > voice/tts_payload.json
-
-          curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}/stream" \
-            -H "Accept: audio/mpeg" \
-            -H "Content-Type: application/json" \
-            -H "xi-api-key: ${ELEVEN_API_KEY}" \
-            --data-binary @voice/tts_payload.json \
-            --output voice/voice.mp3
-
-          ffmpeg -nostdin -y -i voice/voice.mp3 \
-            -filter:a loudnorm=I=-16:TP=-1.5:LRA=11 voice/voice.mp3
-
-      - name: Generate placeholder audio (no TTS)
-        if: ${{ env.ELEVEN_API_KEY == '' }}
-        run: |
-          set -euo pipefail
-          mkdir -p voice
-          echo "⚠️ ELEVEN_API_KEY manquant → génération d'une piste muette pour la vidéo finale."
-          ffmpeg -nostdin -y -f lavfi -i anullsrc=r=48000:cl=stereo -t 72 -q:a 2 voice/voice.mp3
-
-      - name: Upload voice
-        uses: actions/upload-artifact@v4
-        with:
-          name: voice
-          path: voice/
-
-      # =======================
-      # 3) Sélection et téléchargement des clips depuis Manifest
-      # =======================
-      - name: Select clips and merge
-        run: |
-          set -euo pipefail
-          mkdir -p selected_media downloads scripts
-
-          printf '%s\n' 'import os, sys, random, pathlib, urllib.request, ssl' > scripts/select_and_merge.py
-          printf '%s\n' 'def read_manifest(src):' >> scripts/select_and_merge.py
-          printf '%s\n' '    lines=[]' >> scripts/select_and_merge.py
-          printf '%s\n' '    if src.startswith("http://") or src.startswith("https://"):' >> scripts/select_and_merge.py
-          printf '%s\n' '        ctx = ssl.create_default_context()' >> scripts/select_and_merge.py
-          printf '%s\n' '        with urllib.request.urlopen(src, context=ctx, timeout=60) as r:' >> scripts/select_and_merge.py
-          printf '%s\n' '            text = r.read().decode("utf-8", "ignore")' >> scripts/select_and_merge.py
-          printf '%s\n' '            lines = [x.strip() for x in text.splitlines() if x.strip()]' >> scripts/select_and_merge.py
-          printf '%s\n' '    elif os.path.exists(src):' >> scripts/select_and_merge.py
-          printf '%s\n' '        with open(src, "r", encoding="utf-8") as f:' >> scripts/select_and_merge.py
-          printf '%s\n' '            lines = [x.strip() for x in f if x.strip()]' >> scripts/select_and_merge.py
-          printf '%s\n' '    return lines' >> scripts/select_and_merge.py
-
-          printf '%s\n' 'def main():' >> scripts/select_and_merge.py
-          printf '%s\n' '    manifest = os.environ.get("MANIFEST_URL_HORROR","").strip()' >> scripts/select_and_merge.py
-          printf '%s\n' '    count = int(os.environ.get("CLIPS_COUNT","13"))' >> scripts/select_and_merge.py
-          printf '%s\n' '    if not manifest:' >> scripts/select_and_merge.py
-          printf '%s\n' '        print("MANIFEST_URL_HORROR manquant"); sys.exit(1)' >> scripts/select_and_merge.py
-          printf '%s\n' '    urls = read_manifest(manifest)' >> scripts/select_and_merge.py
-          printf '%s\n' '    if len(urls) < count:' >> scripts/select_and_merge.py
-          printf '%s\n' '        print(f"Manifest insuffisant: besoin {count}, trouvé {len(urls)}"); sys.exit(1)' >> scripts/select_and_merge.py
-          printf '%s\n' '    random.shuffle(urls)' >> scripts/select_and_merge.py
-          printf '%s\n' '    sel = urls[:count]' >> scripts/select_and_merge.py
-          printf '%s\n' '    with open("selected_media/manifest.txt","w",encoding="utf-8") as f:' >> scripts/select_and_merge.py
-          printf '%s\n' '        f.write("\n".join(sel))' >> scripts/select_and_merge.py
-
-          printf '%s\n' 'if __name__=="__main__": main()' >> scripts/select_and_merge.py
-
-          python3 scripts/select_and_merge.py
-
           rm -f selected_media/list.txt
+          curl -fsSL "$MANIFEST_URL" -o selected_media/manifest.txt
           i=0
-          while IFS= read -r SRC; do
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
             i=$((i+1))
-            IN="downloads/clip_${i}.mp4"
-            OUT="selected_media/seg_${i}.mp4"
-            curl -L --fail --retry 3 --retry-delay 2 -o "$IN" "$SRC"
-            ffmpeg -nostdin -y -i "$IN" \
+            SRC="selected_media/src_${i}.mp4"
+            SEG="selected_media/seg_${i}.mp4"
+            curl -fsSL -L "$url" -o "$SRC"
+            ffmpeg -nostdin -y -i "$SRC" \
               -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1" \
-              -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an "$OUT"
-            printf "%s\n" "file '$OUT'" >> selected_media/list.txt
+              -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an "$SEG"
+            printf "%s\n" "file '$(pwd)/$SEG'" >> selected_media/list.txt
           done < selected_media/manifest.txt
-
           ffmpeg -nostdin -y -f concat -safe 0 -i selected_media/list.txt -c copy selected_media/temp_merge.mp4
 
-      - name: Upload selected_media
-        uses: actions/upload-artifact@v4
-        with:
-          name: selected_media
-          path: selected_media/
-
-      # =======================
-      # 4) Sous-titres karaoké ASS
-      # =======================
-      - name: Build karaoke subtitles
+      - name: TTS voiceover (ElevenLabs)
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p subtitles scripts
-          printf '%s\n' 'from pathlib import Path' > scripts/gen_ass.py
-          printf '%s\n' 'txt=Path("story/story.txt").read_text(encoding="utf-8").strip()' >> scripts/gen_ass.py
-          printf '%s\n' 'words=txt.split()' >> scripts/gen_ass.py
-          printf '%s\n' 'dur=72.0' >> scripts/gen_ass.py
-          printf '%s\n' 'n=len(words) if words else 1' >> scripts/gen_ass.py
-          printf '%s\n' 'per=max(dur/n,0.35)' >> scripts/gen_ass.py
-          printf '%s\n' 't=0.0; buf=[]; acc=0.0; lines=[]' >> scripts/gen_ass.py
-          printf '%s\n' 'for w in words:' >> scripts/gen_ass.py
-          printf '%s\n' '    buf.append(w); acc+=per' >> scripts/gen_ass.py
-          printf '%s\n' '    if acc>=2.8:' >> scripts/gen_ass.py
-          printf '%s\n' '        lines.append((" ".join(buf), t, t+acc))' >> scripts/gen_ass.py
-          printf '%s\n' '        t=t+acc; buf=[]; acc=0.0' >> scripts/gen_ass.py
-          printf '%s\n' 'if buf:' >> scripts/gen_ass.py
-          printf '%s\n' '    lines.append((" ".join(buf), t, min(t+acc,dur)))' >> scripts/gen_ass.py
+          jq -Rs '{text: ., model_id:"eleven_multilingual_v2", voice_settings:{stability:0.4, similarity_boost:0.7, style:0.2, use_speaker_boost:true}}' \
+            < story/story.txt > audio/tts_payload.json
+          curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
+            -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data-binary @audio/tts_payload.json \
+            --output audio/voice.mp3
 
-          printf '%s\n' 'head="[Script Info]\\nScriptType: v4.00+\\nWrapStyle: 2\\nYCbCr Matrix: TV.601\\n\\n[V4+ Styles]\\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\\nStyle: TikTok,Montserrat SemiBold,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,0,2,30,30,80,1\\n\\n[Events]\\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\\n"' >> scripts/gen_ass.py
-
-          printf '%s\n' 'open("subtitles/captions.ass","w",encoding="utf-8").write(head)' >> scripts/gen_ass.py
-          printf '%s\n' 'with open("subtitles/captions.ass","a",encoding="utf-8") as f:' >> scripts/gen_ass.py
-          printf '%s\n' '    for text,s,e in lines:' >> scripts/gen_ass.py
-          printf '%s\n' '        f.write(f"Dialogue: 0,{s:.2f},{e:.2f},TikTok,,0,0,0,,{text}\\n")' >> scripts/gen_ass.py
-
-          python3 scripts/gen_ass.py
-
-      - name: Upload subtitles
-        uses: actions/upload-artifact@v4
-        with:
-          name: subtitles
-          path: subtitles/captions.ass
-
-      # =======================
-      # 5) Montage final
-      # =======================
-      - name: Build filters and render
+      - name: Build karaoke subtitles (ASS)
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p filters final_video
-          printf '%s\n' "[0:v]eq=contrast=1.06:brightness=0.02:saturation=1.05,unsharp=7:7:0.8:7:7:0.8,vignette=PI/6:0.8[v0]" > filters/filters.txt
+          DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio/voice.mp3)"
+          : > subtitles/captions.ass
+          printf '%s\n' '[Script Info]' >> subtitles/captions.ass
+          printf '%s\n' 'ScriptType: v4.00+' >> subtitles/captions.ass
+          printf '%s\n' 'PlayResX: 1080' >> subtitles/captions.ass
+          printf '%s\n' 'PlayResY: 1920' >> subtitles/captions.ass
+          printf '%s\n' 'ScaledBorderAndShadow: yes' >> subtitles/captions.ass
+          printf '%s\n' '' >> subtitles/captions.ass
+          printf '%s\n' '[V4+ Styles]' >> subtitles/captions.ass
+          printf '%s\n' 'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding' >> subtitles/captions.ass
+          printf '%s\n' 'Style: TikTok,DejaVu Sans,52,&H00FFFFFF,&H000000FF,&H00111111,&H80000000,0,0,0,0,100,100,0,0,1,3.5,1.5,2,90,90,120,1' >> subtitles/captions.ass
+          printf '%s\n' '' >> subtitles/captions.ass
+          printf '%s\n' '[Events]' >> subtitles/captions.ass
+          printf '%s\n' 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text' >> subtitles/captions.ass
+          # Génération des lignes à partir du texte + durée audio, avec tags {\k..} par mot
+          awk -v dur="$DUR" '
+          function fmt(t,  h,m,s,cs) {
+            if (t<0) t=0;
+            h=int(t/3600); m=int((t%3600)/60); s=int(t%60); cs=int((t-int(t))*100);
+            return sprintf("%d:%02d:%02d.%02d",h,m,s,cs);
+          }
+          BEGIN{ minline=2.6; maxw=8; }
+          { if (NR==1) txt=$0; else txt=txt " " $0; }
+          END{
+            n=split(txt, w, /[[:space:]]+/);
+            if (n<1) exit;
+            pw=dur/n; if (pw<0.18) pw=0.18;
+            t=0; acc=0; cnt=0; line="";
+            for (i=1;i<=n;i++){
+              k=int(pw*100+0.5);
+              if (line=="") { line="{\\k"k"}" w[i]; } else { line=line " {\\k"k"}" w[i]; }
+              acc+=pw; cnt++;
+              if (acc>=minline || cnt>=maxw || i==n){
+                start=t; end=t+acc; if (end>dur) end=dur;
+                printf("Dialogue: 0,%s,%s,TikTok,,0,0,0,,%s\n", fmt(start), fmt(end), line);
+                t=end; acc=0; cnt=0; line="";
+              }
+            }
+          }' story/story.txt >> subtitles/captions.ass
 
-          ffmpeg -nostdin -y -i selected_media/temp_merge.mp4 \
-                 -vf "subtitles=subtitles/captions.ass:fontsdir=/usr/share/fonts" \
-                 -c:v libx264 -crf 18 -pix_fmt yuv420p -an filters/video_subbed.mp4
+      - name: Upload intermediates
+        uses: actions/upload-artifact@v4
+        with:
+          name: intermediates
+          path: |
+            selected_media/
+            story/
+            audio/
+            subtitles/
 
-          ffmpeg -nostdin -y -i filters/video_subbed.mp4 -filter_complex_script filters/filters.txt -map "[v0]" -an filters/video_fx.mp4
+      - name: Apply effects, burn subtitles, and mux audio
+        shell: bash
+        run: |
+          set -euo pipefail
+          vf="chromashift=cbh=2:crh=-2,vignette=PI/5,noise=alls=12:allf=t+u,hue=s=0.9,eq=contrast=1.06:brightness=0.02,subtitles=subtitles/captions.ass:fontsdir=."
+          ffmpeg -nostdin -y \
+            -i selected_media/temp_merge.mp4 \
+            -i audio/voice.mp3 \
+            -filter_complex "[0:v]${vf}[v]" -map "[v]" -map 1:a \
+            -r 30 -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+            -c:a aac -b:a 192k -shortest \
+            "final_video/${OUT_NAME}"
 
-          ffmpeg -nostdin -y -i filters/video_fx.mp4 -i voice/voice.mp3 \
-            -filter:a "afade=t=in:ss=0:d=0.4,afade=t=out:st=0:d=0.6,loudnorm=I=-16:TP=-1.5:LRA=11,apad" \
-            -shortest -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k "final_video/${OUT_NAME}"
-
-      - name: Upload final_video
+      - name: Upload final video
         uses: actions/upload-artifact@v4
         with:
           name: final_video
           path: final_video/
 
-      # =======================
-      # 6) Publication Discord
-      # =======================
       - name: Publish to Discord
         if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+        shell: bash
         run: |
           set -euo pipefail
-          echo '{"content":"🎬 Nouveau court d'\''horreur prêt !"}' > discord.json
           curl -sS -X POST \
-            -F "payload_json=@discord.json" \
+            -F "content=🎬 Nouvelle vidéo horreur prête : ${OUT_NAME}" \
             -F "file1=@final_video/${OUT_NAME}" \
-            "${DISCORD_WEBHOOK_URL}" || true 
+            "$DISCORD_WEBHOOK_URL"
