@@ -42,7 +42,35 @@ jobs:
           mkdir -p story voice selected_media subtitles final_video
           mkdir -p "$THEME_DIR"
 
-      # --------- Génération du script (GPT-4o-mini proxy GPT-5 mini) ----------
+      # --------- Téléchargement des clips via manifest RAW (Dropbox ?dl=1) ----------
+      - name: Download clips from manifest
+        shell: bash
+        env:
+          MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MANIFEST_URL:-}" ]; then
+            echo "Aucun MANIFEST_URL fourni (secret manquant). Étape ignorée."
+            exit 0
+          fi
+
+          echo "Téléchargement du manifest depuis $MANIFEST_URL"
+          curl -sL "$MANIFEST_URL" -o manifest_urls.txt
+
+          mkdir -p "$THEME_DIR"
+
+          i=0
+          while IFS= read -r URL; do
+            [ -z "$URL" ] && continue
+            i=$((i+1))
+            FN=$(printf "%s/clip_%02d.mp4" "$THEME_DIR" "$i")
+            echo "Downloading $URL -> $FN"
+            curl -sL "$URL" -o "$FN"
+          done < manifest_urls.txt
+
+          echo "Downloaded $i clips to $THEME_DIR"
+
+      # --------- Génération du script (GPT-4o-mini) ----------
       - name: Generate story (180-200 words, horror)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -218,7 +246,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          D=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "final_video/$OUT_NAME")
+          D=$(ffprobe -v error -show_entries format=duration -of default:noprint_wrappers=1:nokey=1 "final_video/$OUT_NAME")
           NEED=$(python3 -c 'import sys; d=float(sys.argv[1]); print(1 if d<65 else 0)' "$D")
 
           if [ "$NEED" = "1" ]; then
@@ -260,4 +288,3 @@ jobs:
             -F "content=🎥 Nouvelle vidéo générée : **$OUT_NAME**" \
             -F "file=@${FILE}" \
             "$DISCORD_WEBHOOK_URL"
-            
