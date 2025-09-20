@@ -28,7 +28,7 @@ jobs:
       ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
       ELEVEN_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      MANIFEST_URL_HORROR: ${{ secrets.MANIFEST_URL_HORROR }}
+      MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
 
     steps:
       - name: Checkout
