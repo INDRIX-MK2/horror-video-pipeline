@@ -1,4 +1,4 @@
-﻿name: Horror Video Pipeline (Dropbox)
+﻿name: Horror Video Pipeline (Dropbox, no-jq, no-heredoc)
 
 on:
   workflow_dispatch:
@@ -17,14 +17,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # --- Secrets requis ---
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
       DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
-
-      # --- Paramètres ---
       CLIPS_COUNT: ${{ github.event.inputs.clips_count || '13' }}
       OUT_NAME: ${{ github.event.inputs.out_name || 'final_horror.mp4' }}
 
@@ -41,7 +38,7 @@ jobs:
             if [ -z "${!v:-}" ]; then miss+=("$v"); fi
           done
           if [ "${#miss[@]}" -gt 0 ]; then
-            printf 'Secrets manquants: %s\n' "${miss[@]}"
+            echo "Secrets manquants: ${miss[*]}"
             exit 1
           fi
 
@@ -50,26 +47,52 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg jq
+          sudo apt-get install -y ffmpeg python3
 
       # ---------- Story (OpenAI) ----------
-      - name: Generate story (OpenAI)
+      - name: Generate story (OpenAI) - build payload script
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p story
-          SYS='Tu écris un script court et immersif d'"'"'horreur en français.'
-          USER='Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés.'
-          jq -n --arg sys "$SYS" --arg user "$USER" \
-            '{model:"gpt-4o-mini",temperature:1, messages:[{role:"system",content:$sys},{role:"user",content:$user}]}' \
-            > story/payload.json
+          mkdir -p story scripts
+          printf '%s\n' "import json, os, sys" > scripts/mk_openai_payload.py
+          printf '%s\n' "sys_text = os.environ.get('SYS','')" >> scripts/mk_openai_payload.py
+          printf '%s\n' "user_text = os.environ.get('USER_PROMPT','')" >> scripts/mk_openai_payload.py
+          printf '%s\n' "payload={" >> scripts/mk_openai_payload.py
+          printf '%s\n' "  \"model\":\"gpt-4o-mini\"," >> scripts/mk_openai_payload.py
+          printf '%s\n' "  \"temperature\":1," >> scripts/mk_openai_payload.py
+          printf '%s\n' "  \"messages\":[{\"role\":\"system\",\"content\":sys_text},{\"role\":\"user\",\"content\":user_text}]" >> scripts/mk_openai_payload.py
+          printf '%s\n' "}" >> scripts/mk_openai_payload.py
+          printf '%s\n' "json.dump(payload, sys.stdout, ensure_ascii=False)" >> scripts/mk_openai_payload.py
 
-          curl -sS https://api.openai.com/v1/chat/completions \
+          printf '%s\n' "import json, sys" > scripts/extract_openai_text.py
+          printf '%s\n' "data=json.load(open(sys.argv[1],'r',encoding='utf-8'))" >> scripts/extract_openai_text.py
+          printf '%s\n' "print(data['choices'][0]['message']['content'])" >> scripts/extract_openai_text.py
+
+      - name: Generate story (OpenAI) - call API
+        shell: bash
+        run: |
+          set -euo pipefail
+          # On place les textes ici (plus d'env YAML piégeux)
+          SYS="Tu écris un script court et immersif d'horreur en français."
+          USER_PROMPT="Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+
+          mkdir -p story
+          SYS="$SYS" USER_PROMPT="$USER_PROMPT" python3 scripts/mk_openai_payload.py > story/payload.json
+
+          HTTP_CODE=$(curl -sS -o story/resp.json -w "%{http_code}" \
+            https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -d @story/payload.json \
-            | jq -r '.choices[0].message.content' > story/story.txt
+            --data-binary @story/payload.json)
 
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "OpenAI HTTP $HTTP_CODE"
+            head -c 500 story/resp.json || true
+            exit 1
+          fi
+
+          python3 scripts/extract_openai_text.py story/resp.json > story/story.txt
           if [ ! -s story/story.txt ]; then echo "Story vide"; exit 1; fi
 
       # ---------- Ingest clips ----------
@@ -111,11 +134,9 @@ jobs:
             ffmpeg -nostdin -y -i "$SRC" \
               -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,eq=contrast=1.08:brightness=0.02:saturation=1.05,vignette,noise=alls=10:allf=t+u" \
               -r 30 -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p -an "$OUT"
-            # IMPORTANT: chemins relatifs au fichier list.txt => seulement le nom local
             printf "file '%s'\n" "seg_${i}.mp4" >> selected_media/list.txt
           done < selected_media/manifest.txt
 
-          # concat
           ( cd selected_media && ffmpeg -nostdin -y -f concat -safe 0 -i list.txt -c copy merged.mp4 )
 
       # ---------- TTS (ElevenLabs) ----------
@@ -123,17 +144,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p audio
+          mkdir -p audio scripts
           TEXT=$(tr '\n' ' ' < story/story.txt | sed 's/  */ /g' | sed 's/"/\\"/g')
 
-          jq -n --arg text "$TEXT" \
-            '{text:$text,model_id:"eleven_multilingual_v2",voice_settings:{stability:0.4,similarity_boost:0.8}}' \
-            > audio/tts_payload.json
+          printf '%s\n' "import json, os, sys" > scripts/mk_eleven_payload.py
+          printf '%s\n' "text=os.environ.get('TTS_TEXT','')" >> scripts/mk_eleven_payload.py
+          printf '%s\n' "payload={\"text\":text,\"model_id\":\"eleven_multilingual_v2\",\"voice_settings\":{\"stability\":0.4,\"similarity_boost\":0.8}}" >> scripts/mk_eleven_payload.py
+          printf '%s\n' "json.dump(payload, sys.stdout, ensure_ascii=False)" >> scripts/mk_eleven_payload.py
+
+          TTS_TEXT="$TEXT" python3 scripts/mk_eleven_payload.py > audio/tts_payload.json
 
           curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
             -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
             -H "Content-Type: application/json" \
-            --data @audio/tts_payload.json \
+            --data-binary @audio/tts_payload.json \
             --output audio/voice.mp3
 
           ffmpeg -nostdin -y -i audio/voice.mp3 -ar 44100 -ac 2 audio/voice.wav
@@ -146,7 +170,6 @@ jobs:
           set -euo pipefail
           mkdir -p subtitles
 
-          # Header ASS
           printf '%s\n' "[Script Info]" > subtitles/captions.ass
           printf '%s\n' "ScriptType: v4.00+" >> subtitles/captions.ass
           printf '%s\n' "PlayResX: 1080" >> subtitles/captions.ass
@@ -160,7 +183,6 @@ jobs:
           printf '%s\n' "[Events]" >> subtitles/captions.ass
           printf '%s\n' "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text" >> subtitles/captions.ass
 
-          # Script Python pour timecoding (écrit en fichier, pas de heredoc)
           printf '%s\n' "import sys" > subtitles/build_ass.py
           printf '%s\n' "dur=float(sys.argv[1])" >> subtitles/build_ass.py
           printf '%s\n' "txt=open('story/story.txt','r',encoding='utf-8').read().strip().replace('\n',' ')" >> subtitles/build_ass.py
@@ -194,8 +216,6 @@ jobs:
           mkdir -p final_video
           Vdur=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 selected_media/merged.mp4)
           Adur=$(cat audio/voice_duration.txt)
-
-          # Décision sans heredoc (awk)
           need_pad=$(awk -v v="$Vdur" -v a="$Adur" 'BEGIN{print (v+0 < a+1.0)?1:0}')
           if [ "$need_pad" = "1" ]; then
             EXTRA=$(awk -v v="$Vdur" -v a="$Adur" 'BEGIN{d=a - v + 1.0; if (d<0) d=0; print d}')
@@ -222,84 +242,57 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          FILE="final_video/${OUT_NAME}"
-          if [ ! -s "$FILE" ]; then echo "Fichier vidéo introuvable"; exit 1; fi
+          mkdir -p scripts
+          printf '%s\n' "import sys, json, os, pathlib" > scripts/dbx_utils.py
+          printf '%s\n' "from urllib.request import Request, urlopen" >> scripts/dbx_utils.py
+          printf '%s\n' "TOK=os.environ['DROPBOX_ACCESS_TOKEN']" >> scripts/dbx_utils.py
+          printf '%s\n' "FILE=sys.argv[1]; REMOTE=sys.argv[2]" >> scripts/dbx_utils.py
+          printf '%s\n' "import os" >> scripts/dbx_utils.py
+          printf '%s\n' "size=os.path.getsize(FILE)" >> scripts/dbx_utils.py
+          printf '%s\n' "def post(url, headers, data):" >> scripts/dbx_utils.py
+          printf '%s\n' "    from urllib.request import Request, urlopen" >> scripts/dbx_utils.py
+          printf '%s\n' "    req=Request(url, data=data, headers=headers, method='POST')" >> scripts/dbx_utils.py
+          printf '%s\n' "    return urlopen(req).read()" >> scripts/dbx_utils.py
+          printf '%s\n' "if size <= 150*1024*1024:" >> scripts/dbx_utils.py
+          printf '%s\n' "    arg=json.dumps({'path':REMOTE,'mode':'add','autorename':True,'mute':False}).encode('utf-8')" >> scripts/dbx_utils.py
+          printf '%s\n' "    body=open(FILE,'rb').read()" >> scripts/dbx_utils.py
+          printf '%s\n' "    h={'Authorization':'Bearer '+TOK,'Dropbox-API-Arg':arg.decode(),'Content-Type':'application/octet-stream'}" >> scripts/dbx_utils.py
+          printf '%s\n' "    post('https://content.dropboxapi.com/2/files/upload', h, body)" >> scripts/dbx_utils.py
+          printf '%s\n' "else:" >> scripts/dbx_utils.py
+          printf '%s\n' "    h={'Authorization':'Bearer '+TOK,'Content-Type':'application/octet-stream','Dropbox-API-Arg':'{\"close\": false}'}" >> scripts/dbx_utils.py
+          printf '%s\n' "    sid=json.loads(post('https://content.dropboxapi.com/2/files/upload_session/start', h, b''))['session_id']" >> scripts/dbx_utils.py
+          printf '%s\n' "    chunk=15*1024*1024; off=0" >> scripts/dbx_utils.py
+          printf '%s\n' "    with open(FILE,'rb') as f:" >> scripts/dbx_utils.py
+          printf '%s\n' "        while True:" >> scripts/dbx_utils.py
+          printf '%s\n' "            buf=f.read(chunk)" >> scripts/dbx_utils.py
+          printf '%s\n' "            if not buf: break" >> scripts/dbx_utils.py
+          printf '%s\n' "            arg={'cursor':{'session_id':sid,'offset':off},'close':False}" >> scripts/dbx_utils.py
+          printf '%s\n' "            h={'Authorization':'Bearer '+TOK,'Content-Type':'application/octet-stream','Dropbox-API-Arg':json.dumps(arg)}" >> scripts/dbx_utils.py
+          printf '%s\n' "            post('https://content.dropboxapi.com/2/files/upload_session/append_v2', h, buf)" >> scripts/dbx_utils.py
+          printf '%s\n' "            off+=len(buf)" >> scripts/dbx_utils.py
+          printf '%s\n' "    commit={'cursor':{'session_id':sid,'offset':size},'commit':{'path':REMOTE,'mode':'add','autorename':True,'mute':False}}" >> scripts/dbx_utils.py
+          printf '%s\n' "    h={'Authorization':'Bearer '+TOK,'Content-Type':'application/octet-stream','Dropbox-API-Arg':json.dumps(commit)}" >> scripts/dbx_utils.py
+          printf '%s\n' "    post('https://content.dropboxapi.com/2/files/upload_session/finish', h, b'')" >> scripts/dbx_utils.py
+          printf '%s\n' "body=json.dumps({'path':REMOTE,'settings':{'requested_visibility':'public'}}).encode('utf-8')" >> scripts/dbx_utils.py
+          printf '%s\n' "h={'Authorization':'Bearer '+TOK,'Content-Type':'application/json'}" >> scripts/dbx_utils.py
+          printf '%s\n' "import json" >> scripts/dbx_utils.py
+          printf '%s\n' "try:" >> scripts/dbx_utils.py
+          printf '%s\n' "    link=json.loads(post('https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings', h, body))['url']" >> scripts/dbx_utils.py
+          printf '%s\n' "except Exception:" >> scripts/dbx_utils.py
+          printf '%s\n' "    body=json.dumps({'path':REMOTE,'direct_only':True}).encode('utf-8')" >> scripts/dbx_utils.py
+          printf '%s\n' "    link=json.loads(post('https://api.dropboxapi.com/2/sharing/list_shared_links', h, body))['links'][0]['url']" >> scripts/dbx_utils.py
+          printf '%s\n' "print(link.replace('?dl=0','?dl=1'))" >> scripts/dbx_utils.py
 
+          FILE="final_video/${OUT_NAME}"
+          [ -s "$FILE" ] || (echo "Fichier vidéo introuvable"; exit 1)
           TS=$(date +"%Y%m%d_%H%M%S")
           REMOTE_DIR="/horror"
           REMOTE_PATH="${REMOTE_DIR}/${TS}_${OUT_NAME}"
 
-          SIZE=$(stat -c%s "$FILE")
-          LIMIT=$((150*1024*1024))  # 150MB
-
-          if [ "$SIZE" -le "$LIMIT" ]; then
-            jq -n --arg path "$REMOTE_PATH" \
-              '{"path":$path,"mode":"add","autorename":true,"mute":false}' > /tmp/dbx_upload.json
-            API_ARG=$(jq -c . /tmp/dbx_upload.json)
-            curl -sS -X POST "https://content.dropboxapi.com/2/files/upload" \
-              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
-              -H "Dropbox-API-Arg: $API_ARG" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$FILE" > /tmp/dbx_resp.json
-          else
-            CHUNK=$((15*1024*1024))
-            SESSION_ID=$(curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/start" \
-              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              -H "Dropbox-API-Arg: {\"close\": false}" \
-              --data-binary @/dev/null | jq -r '.session_id')
-
-            if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
-              echo "Échec démarrage session Dropbox"; exit 1
-            fi
-
-            OFFSET=0
-            CHUNK_SIZE=$CHUNK
-            while [ "$OFFSET" -lt "$SIZE" ]; do
-              CUR=$CHUNK_SIZE
-              REM=$((SIZE - OFFSET))
-              if [ "$REM" -lt "$CHUNK_SIZE" ]; then CUR="$REM"; fi
-              ARG=$(printf '{"cursor":{"session_id":"%s","offset":%s},"close":false}' "$SESSION_ID" "$OFFSET")
-              dd if="$FILE" bs="$CHUNK_SIZE" skip=$((OFFSET/CHUNK_SIZE)) count=1 status=none | \
-              curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/append_v2" \
-                -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
-                -H "Content-Type: application/octet-stream" \
-                -H "Dropbox-API-Arg: $ARG" \
-                --data-binary @-
-              OFFSET=$((OFFSET + CUR))
-            done
-
-            ARG=$(printf '{"cursor":{"session_id":"%s","offset":%s},"commit":{"path":"%s","mode":"add","autorename":true,"mute":false}}' "$SESSION_ID" "$SIZE" "$REMOTE_PATH")
-            curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/finish" \
-              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              -H "Dropbox-API-Arg: $ARG" \
-              --data-binary @/dev/null > /tmp/dbx_resp.json
-          fi
-
-          jq -n --arg path "$REMOTE_PATH" \
-            '{"path":$path,"settings":{"requested_visibility":"public"}}' > /tmp/dbx_link.json
-          LINK_JSON=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings" \
-            -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data @/tmp/dbx_link.json)
-
-          URL=$(printf '%s\n' "$LINK_JSON" | jq -r '.url // empty')
-          if [ -z "$URL" ]; then
-            LIST=$(jq -n --arg path "$REMOTE_PATH" '{"path":$path,"direct_only":true}')
-            URL=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/list_shared_links" \
-              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data "$LIST" | jq -r '.links[0].url // empty')
-          fi
-
-          if [ -n "$URL" ]; then
-            DIRECT="${URL%?dl=0}?dl=1"
-            echo "Dropbox direct link: $DIRECT"
-            printf '%s\n' "$DIRECT" > final_video/dropbox_link.txt
-          else
-            echo "Aucun lien Dropbox récupéré (vérifie les permissions de l'app)."
-          fi
+          LINK=$(python3 scripts/dbx_utils.py "$FILE" "$REMOTE_PATH")
+          mkdir -p final_video
+          printf '%s\n' "$LINK" > final_video/dropbox_link.txt
+          echo "Dropbox direct link: $LINK"
 
       - name: Upload artifact (Dropbox link)
         if: always()
