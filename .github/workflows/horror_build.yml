@@ -1,182 +1,309 @@
-﻿name: Horror TikTok Builder
+﻿name: Horror Video Pipeline (Dropbox)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 8 * * *" # chaque jour à 08:00 UTC
+    inputs:
+      clips_count:
+        description: "Nombre de clips à assembler"
+        required: false
+        default: "13"
+      out_name:
+        description: "Nom du fichier de sortie"
+        required: false
+        default: "final_horror.mp4"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+
     env:
+      # --- Secrets requis ---
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
-      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      OUT_NAME: final_horror.mp4
-      CLIPS_COUNT: "13"
+      DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
+
+      # --- Paramètres ---
+      CLIPS_COUNT: ${{ github.event.inputs.clips_count || '13' }}
+      OUT_NAME: ${{ github.event.inputs.out_name || 'final_horror.mp4' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Check required secrets
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq curl fonts-dejavu-core
-
-      - name: Preflight secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-          missing=0
-          for v in OPENAI_API_KEY ELEVENLABS_API_KEY ELEVENLABS_VOICE_ID MANIFEST_URL DISCORD_WEBHOOK_URL; do
-            if [ -z "${!v:-}" ]; then
-              echo "$v manquant"
-              missing=1
-            fi
+          miss=()
+          for v in OPENAI_API_KEY ELEVENLABS_API_KEY ELEVENLABS_VOICE_ID MANIFEST_URL DROPBOX_ACCESS_TOKEN; do
+            if [ -z "${!v:-}" ]; then miss+=("$v"); fi
           done
-          [ "$missing" -eq 0 ]
+          if [ "${#miss[@]}" -gt 0 ]; then
+            printf 'Secrets manquants: %s\n' "${miss[@]}"
+            exit 1
+          fi
 
-      - name: Make directories
+      - name: Install tools
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p selected_media audio story subtitles final_video
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg jq
 
-      - name: Generate story with OpenAI
+      # ---------- Story (OpenAI) ----------
+      - name: Generate story (OpenAI)
         shell: bash
         run: |
           set -euo pipefail
-          SYS="Tu écris un script court et immersif d'horreur en français."
-          USER="Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+          mkdir -p story
+          SYS='Tu écris un script court et immersif d'"'"'horreur en français.'
+          USER='Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés.'
           jq -n --arg sys "$SYS" --arg user "$USER" \
-            '{model:"gpt-4o-mini",temperature:1,messages:[{role:"system",content:$sys},{role:"user",content:$user}]}' \
+            '{model:"gpt-4o-mini",temperature:1, messages:[{role:"system",content:$sys},{role:"user",content:$user}]}' \
             > story/payload.json
+
           curl -sS https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
             -d @story/payload.json \
-          | jq -r '.choices[0].message.content' > story/story.txt
-          # Nettoie les lignes vides éventuelles
-          awk 'NF' story/story.txt > story/.t && mv story/.t story/story.txt
+            | jq -r '.choices[0].message.content' > story/story.txt
 
-      - name: Fetch manifest and re-encode segments (1080x1920/30fps)
+          if [ ! -s story/story.txt ]; then echo "Story vide"; exit 1; fi
+
+      # ---------- Ingest clips ----------
+      - name: Download manifest & clips
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bank_video/Horreur selected_media
+          curl -sSL "$MANIFEST_URL" -o selected_media/manifest_urls.txt
+          awk 'NF' selected_media/manifest_urls.txt > selected_media/urls.txt
+
+          mapfile -t URLS < selected_media/urls.txt
+          if [ "${#URLS[@]}" -eq 0 ]; then echo "Aucune URL dans le manifest"; exit 1; fi
+
+          printf '%s\n' "${URLS[@]}" | shuf > selected_media/urls_shuf.txt
+          mapfile -t SEL < <(head -n "$CLIPS_COUNT" selected_media/urls_shuf.txt)
+
+          : > selected_media/manifest.txt
+          idx=0
+          for u in "${SEL[@]}"; do
+            idx=$((idx+1))
+            nm=$(printf 'clip_%02d.mp4' "$idx")
+            dest="bank_video/Horreur/$nm"
+            curl -L --fail --retry 3 --retry-all-errors -o "$dest" "$u"
+            printf '%s\n' "$dest" >> selected_media/manifest.txt
+          done
+
+      # ---------- Normalize + concat ----------
+      - name: Normalize clips and concat (1080x1920/30fps + effets)
         shell: bash
         run: |
           set -euo pipefail
           rm -f selected_media/list.txt
-          curl -fsSL "$MANIFEST_URL" -o selected_media/manifest.txt
           i=0
-          while IFS= read -r url; do
-            [ -z "$url" ] && continue
+          while IFS= read -r SRC; do
+            [ -n "$SRC" ] || continue
             i=$((i+1))
-            SRC="selected_media/src_${i}.mp4"
-            SEG="selected_media/seg_${i}.mp4"
-            curl -fsSL -L "$url" -o "$SRC"
+            OUT="selected_media/seg_${i}.mp4"
             ffmpeg -nostdin -y -i "$SRC" \
-              -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1" \
-              -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an "$SEG"
-            printf "%s\n" "file '$(pwd)/$SEG'" >> selected_media/list.txt
+              -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,eq=contrast=1.08:brightness=0.02:saturation=1.05,vignette,noise=alls=10:allf=t+u" \
+              -r 30 -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p -an "$OUT"
+            # IMPORTANT: chemins relatifs au fichier list.txt => seulement le nom local
+            printf "file '%s'\n" "seg_${i}.mp4" >> selected_media/list.txt
           done < selected_media/manifest.txt
-          ffmpeg -nostdin -y -f concat -safe 0 -i selected_media/list.txt -c copy selected_media/temp_merge.mp4
 
-      - name: TTS voiceover (ElevenLabs)
+          # concat
+          ( cd selected_media && ffmpeg -nostdin -y -f concat -safe 0 -i list.txt -c copy merged.mp4 )
+
+      # ---------- TTS (ElevenLabs) ----------
+      - name: Generate voiceover (ElevenLabs)
         shell: bash
         run: |
           set -euo pipefail
-          jq -Rs '{text: ., model_id:"eleven_multilingual_v2", voice_settings:{stability:0.4, similarity_boost:0.7, style:0.2, use_speaker_boost:true}}' \
-            < story/story.txt > audio/tts_payload.json
+          mkdir -p audio
+          TEXT=$(tr '\n' ' ' < story/story.txt | sed 's/  */ /g' | sed 's/"/\\"/g')
+
+          jq -n --arg text "$TEXT" \
+            '{text:$text,model_id:"eleven_multilingual_v2",voice_settings:{stability:0.4,similarity_boost:0.8}}' \
+            > audio/tts_payload.json
+
           curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
             -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
             -H "Content-Type: application/json" \
-            --data-binary @audio/tts_payload.json \
+            --data @audio/tts_payload.json \
             --output audio/voice.mp3
 
-      - name: Build karaoke subtitles (ASS)
+          ffmpeg -nostdin -y -i audio/voice.mp3 -ar 44100 -ac 2 audio/voice.wav
+          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav > audio/voice_duration.txt
+
+      # ---------- Subtitles (.ass) ----------
+      - name: Build subtitles (.ass)
         shell: bash
         run: |
           set -euo pipefail
-          DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio/voice.mp3)"
-          : > subtitles/captions.ass
-          printf '%s\n' '[Script Info]' >> subtitles/captions.ass
-          printf '%s\n' 'ScriptType: v4.00+' >> subtitles/captions.ass
-          printf '%s\n' 'PlayResX: 1080' >> subtitles/captions.ass
-          printf '%s\n' 'PlayResY: 1920' >> subtitles/captions.ass
-          printf '%s\n' 'ScaledBorderAndShadow: yes' >> subtitles/captions.ass
-          printf '%s\n' '' >> subtitles/captions.ass
-          printf '%s\n' '[V4+ Styles]' >> subtitles/captions.ass
-          printf '%s\n' 'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding' >> subtitles/captions.ass
-          printf '%s\n' 'Style: TikTok,DejaVu Sans,52,&H00FFFFFF,&H000000FF,&H00111111,&H80000000,0,0,0,0,100,100,0,0,1,3.5,1.5,2,90,90,120,1' >> subtitles/captions.ass
-          printf '%s\n' '' >> subtitles/captions.ass
-          printf '%s\n' '[Events]' >> subtitles/captions.ass
-          printf '%s\n' 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text' >> subtitles/captions.ass
-          # Génération des lignes à partir du texte + durée audio, avec tags {\k..} par mot
-          awk -v dur="$DUR" '
-          function fmt(t,  h,m,s,cs) {
-            if (t<0) t=0;
-            h=int(t/3600); m=int((t%3600)/60); s=int(t%60); cs=int((t-int(t))*100);
-            return sprintf("%d:%02d:%02d.%02d",h,m,s,cs);
-          }
-          BEGIN{ minline=2.6; maxw=8; }
-          { if (NR==1) txt=$0; else txt=txt " " $0; }
-          END{
-            n=split(txt, w, /[[:space:]]+/);
-            if (n<1) exit;
-            pw=dur/n; if (pw<0.18) pw=0.18;
-            t=0; acc=0; cnt=0; line="";
-            for (i=1;i<=n;i++){
-              k=int(pw*100+0.5);
-              if (line=="") { line="{\\k"k"}" w[i]; } else { line=line " {\\k"k"}" w[i]; }
-              acc+=pw; cnt++;
-              if (acc>=minline || cnt>=maxw || i==n){
-                start=t; end=t+acc; if (end>dur) end=dur;
-                printf("Dialogue: 0,%s,%s,TikTok,,0,0,0,,%s\n", fmt(start), fmt(end), line);
-                t=end; acc=0; cnt=0; line="";
-              }
-            }
-          }' story/story.txt >> subtitles/captions.ass
+          mkdir -p subtitles
 
-      - name: Upload intermediates
-        uses: actions/upload-artifact@v4
-        with:
-          name: intermediates
-          path: |
-            selected_media/
-            story/
-            audio/
-            subtitles/
+          # Header ASS
+          printf '%s\n' "[Script Info]" > subtitles/captions.ass
+          printf '%s\n' "ScriptType: v4.00+" >> subtitles/captions.ass
+          printf '%s\n' "PlayResX: 1080" >> subtitles/captions.ass
+          printf '%s\n' "PlayResY: 1920" >> subtitles/captions.ass
+          printf '%s\n' "Timer: 100.0000" >> subtitles/captions.ass
+          printf '\n' >> subtitles/captions.ass
+          printf '%s\n' "[V4+ Styles]" >> subtitles/captions.ass
+          printf '%s\n' "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding" >> subtitles/captions.ass
+          printf '%s\n' "Style: TikTok,Montserrat SemiBold,56,&H00FFFFFF,&H00FFFFFF,&H00222222,&H66000000,-1,0,0,0,100,100,0,0,1,3,0,2,50,50,60,1" >> subtitles/captions.ass
+          printf '\n' >> subtitles/captions.ass
+          printf '%s\n' "[Events]" >> subtitles/captions.ass
+          printf '%s\n' "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text" >> subtitles/captions.ass
 
-      - name: Apply effects, burn subtitles, and mux audio
+          # Script Python pour timecoding (écrit en fichier, pas de heredoc)
+          printf '%s\n' "import sys" > subtitles/build_ass.py
+          printf '%s\n' "dur=float(sys.argv[1])" >> subtitles/build_ass.py
+          printf '%s\n' "txt=open('story/story.txt','r',encoding='utf-8').read().strip().replace('\n',' ')" >> subtitles/build_ass.py
+          printf '%s\n' "words=txt.split()" >> subtitles/build_ass.py
+          printf '%s\n' "n=len(words)" >> subtitles/build_ass.py
+          printf '%s\n' "per=max(dur/max(n/5,1), 2.0)" >> subtitles/build_ass.py
+          printf '%s\n' "t=0.0; acc=0.0; buf=[]; lines=[]" >> subtitles/build_ass.py
+          printf '%s\n' "def ts(x):" >> subtitles/build_ass.py
+          printf '%s\n' "    m=int(x//60); s=int(x%60); cs=int(round((x-m*60-s)*100))" >> subtitles/build_ass.py
+          printf '%s\n' "    return f'{m:d}:{s:02d}:{cs:02d}.00'" >> subtitles/build_ass.py
+          printf '%s\n' "for w in words:" >> subtitles/build_ass.py
+          printf '%s\n' "    buf.append(w); acc+=per" >> subtitles/build_ass.py
+          printf '%s\n' "    if acc>=2.8:" >> subtitles/build_ass.py
+          printf '%s\n' "        start=t; end=min(t+acc, dur)" >> subtitles/build_ass.py
+          printf '%s\n' "        lines.append((start,end,' '.join(buf))); t=end; buf=[]; acc=0.0" >> subtitles/build_ass.py
+          printf '%s\n' "if buf:" >> subtitles/build_ass.py
+          printf '%s\n' "    start=t; end=min(t+(acc if acc>0 else 2.0), dur)" >> subtitles/build_ass.py
+          printf '%s\n' "    lines.append((start,end,' '.join(buf)))" >> subtitles/build_ass.py
+          printf '%s\n' "with open('subtitles/captions.ass','a',encoding='utf-8') as f:" >> subtitles/build_ass.py
+          printf '%s\n' "    for s,e,text in lines:" >> subtitles/build_ass.py
+          printf '%s\n' "        print(f'Dialogue: 0,{ts(s)},{ts(e)},TikTok,,0,0,0,,{text}', file=f)" >> subtitles/build_ass.py
+
+          DUR=$(cat audio/voice_duration.txt)
+          python3 subtitles/build_ass.py "$DUR"
+
+      # ---------- Render final ----------
+      - name: Render final video with subs + VO
         shell: bash
         run: |
           set -euo pipefail
-          vf="chromashift=cbh=2:crh=-2,vignette=PI/5,noise=alls=12:allf=t+u,hue=s=0.9,eq=contrast=1.06:brightness=0.02,subtitles=subtitles/captions.ass:fontsdir=."
-          ffmpeg -nostdin -y \
-            -i selected_media/temp_merge.mp4 \
-            -i audio/voice.mp3 \
-            -filter_complex "[0:v]${vf}[v]" -map "[v]" -map 1:a \
-            -r 30 -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
-            -c:a aac -b:a 192k -shortest \
-            "final_video/${OUT_NAME}"
+          mkdir -p final_video
+          Vdur=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 selected_media/merged.mp4)
+          Adur=$(cat audio/voice_duration.txt)
 
-      - name: Upload final video
+          # Décision sans heredoc (awk)
+          need_pad=$(awk -v v="$Vdur" -v a="$Adur" 'BEGIN{print (v+0 < a+1.0)?1:0}')
+          if [ "$need_pad" = "1" ]; then
+            EXTRA=$(awk -v v="$Vdur" -v a="$Adur" 'BEGIN{d=a - v + 1.0; if (d<0) d=0; print d}')
+            ffmpeg -nostdin -y -f lavfi -i "color=c=black:s=1080x1920:d=${EXTRA}" -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an selected_media/outro.mp4
+            printf "file '%s'\n" "merged.mp4" > selected_media/full_list.txt
+            printf "file '%s'\n" "outro.mp4" >> selected_media/full_list.txt
+            ( cd selected_media && ffmpeg -nostdin -y -f concat -safe 0 -i full_list.txt -c copy merged.mp4 )
+          fi
+
+          ffmpeg -nostdin -y -i selected_media/merged.mp4 -i audio/voice.wav \
+            -vf "subtitles=subtitles/captions.ass" \
+            -map 0:v:0 -map 1:a:0 \
+            -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+            -c:a aac -b:a 192k -shortest "final_video/${OUT_NAME}"
+
+      - name: Upload artifact (final video)
         uses: actions/upload-artifact@v4
         with:
           name: final_video
           path: final_video/
 
-      - name: Publish to Discord
-        if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+      # ---------- Dropbox upload ----------
+      - name: Upload to Dropbox
         shell: bash
         run: |
           set -euo pipefail
-          curl -sS -X POST \
-            -F "content=🎬 Nouvelle vidéo horreur prête : ${OUT_NAME}" \
-            -F "file1=@final_video/${OUT_NAME}" \
-            "$DISCORD_WEBHOOK_URL"
+          FILE="final_video/${OUT_NAME}"
+          if [ ! -s "$FILE" ]; then echo "Fichier vidéo introuvable"; exit 1; fi
+
+          TS=$(date +"%Y%m%d_%H%M%S")
+          REMOTE_DIR="/horror"
+          REMOTE_PATH="${REMOTE_DIR}/${TS}_${OUT_NAME}"
+
+          SIZE=$(stat -c%s "$FILE")
+          LIMIT=$((150*1024*1024))  # 150MB
+
+          if [ "$SIZE" -le "$LIMIT" ]; then
+            jq -n --arg path "$REMOTE_PATH" \
+              '{"path":$path,"mode":"add","autorename":true,"mute":false}' > /tmp/dbx_upload.json
+            API_ARG=$(jq -c . /tmp/dbx_upload.json)
+            curl -sS -X POST "https://content.dropboxapi.com/2/files/upload" \
+              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
+              -H "Dropbox-API-Arg: $API_ARG" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$FILE" > /tmp/dbx_resp.json
+          else
+            CHUNK=$((15*1024*1024))
+            SESSION_ID=$(curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/start" \
+              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              -H "Dropbox-API-Arg: {\"close\": false}" \
+              --data-binary @/dev/null | jq -r '.session_id')
+
+            if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
+              echo "Échec démarrage session Dropbox"; exit 1
+            fi
+
+            OFFSET=0
+            CHUNK_SIZE=$CHUNK
+            while [ "$OFFSET" -lt "$SIZE" ]; do
+              CUR=$CHUNK_SIZE
+              REM=$((SIZE - OFFSET))
+              if [ "$REM" -lt "$CHUNK_SIZE" ]; then CUR="$REM"; fi
+              ARG=$(printf '{"cursor":{"session_id":"%s","offset":%s},"close":false}' "$SESSION_ID" "$OFFSET")
+              dd if="$FILE" bs="$CHUNK_SIZE" skip=$((OFFSET/CHUNK_SIZE)) count=1 status=none | \
+              curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/append_v2" \
+                -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                -H "Dropbox-API-Arg: $ARG" \
+                --data-binary @-
+              OFFSET=$((OFFSET + CUR))
+            done
+
+            ARG=$(printf '{"cursor":{"session_id":"%s","offset":%s},"commit":{"path":"%s","mode":"add","autorename":true,"mute":false}}' "$SESSION_ID" "$SIZE" "$REMOTE_PATH")
+            curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/finish" \
+              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              -H "Dropbox-API-Arg: $ARG" \
+              --data-binary @/dev/null > /tmp/dbx_resp.json
+          fi
+
+          jq -n --arg path "$REMOTE_PATH" \
+            '{"path":$path,"settings":{"requested_visibility":"public"}}' > /tmp/dbx_link.json
+          LINK_JSON=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings" \
+            -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data @/tmp/dbx_link.json)
+
+          URL=$(printf '%s\n' "$LINK_JSON" | jq -r '.url // empty')
+          if [ -z "$URL" ]; then
+            LIST=$(jq -n --arg path "$REMOTE_PATH" '{"path":$path,"direct_only":true}')
+            URL=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/list_shared_links" \
+              -H "Authorization: Bearer ${DROPBOX_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$LIST" | jq -r '.links[0].url // empty')
+          fi
+
+          if [ -n "$URL" ]; then
+            DIRECT="${URL%?dl=0}?dl=1"
+            echo "Dropbox direct link: $DIRECT"
+            printf '%s\n' "$DIRECT" > final_video/dropbox_link.txt
+          else
+            echo "Aucun lien Dropbox récupéré (vérifie les permissions de l'app)."
+          fi
+
+      - name: Upload artifact (Dropbox link)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dropbox_link
+          path: final_video/dropbox_link.txt
