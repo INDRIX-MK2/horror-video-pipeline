@@ -163,25 +163,42 @@ jobs:
           printf '%s\n' "$SRCV" > selected_media/src_video.txt
 
       # ---------- Sous-titres ASS (timés sur l'audio) ----------
-      - name: Build captions.ass
+      - name: Build captions.ass (fixed)
         run: |
           set -euo pipefail
           mkdir -p subtitles
 
-          printf '%s\n' 'import re,math' > subtitles/build_ass.py
+          # (Re)génère un script Python sans heredoc
+          rm -f subtitles/build_ass.py
+          printf '%s\n' 'import re' >> subtitles/build_ass.py
           printf '%s\n' 'from pathlib import Path' >> subtitles/build_ass.py
           printf '%s\n' 'dur=float(Path("audio/voice_duration.txt").read_text().strip())' >> subtitles/build_ass.py
           printf '%s\n' 'txt=Path("story/clean.txt").read_text(encoding="utf-8").strip()' >> subtitles/build_ass.py
           printf '%s\n' 'words=re.findall(r"\S+",txt)' >> subtitles/build_ass.py
           printf '%s\n' 'n=len(words); per=max(dur/max(n/6,1),0.35)' >> subtitles/build_ass.py
           printf '%s\n' 'def ts(x):' >> subtitles/build_ass.py
-          printf '%s\n' '  ms=int(round((x-int(x))*100))' >> subtitles/build_ass.py
-          printf '%s\n' '  return f"{int(x)//3600:d}:{(int(x)//60)%60:02d}:{int(x)%60:02d}.{ms:02d}"' >> subtitles/build_ass.py
+          printf '%s\n' '  total=max(0.0,float(x))' >> subtitles/build_ass.py
+          printf '%s\n' '  h=int(total//3600); m=int((total%3600)//60); s=int(total%60)' >> subtitles/build_ass.py
+          printf '%s\n' '  cs=int(round((total-int(total))*100))' >> subtitles/build_ass.py
+          printf '%s\n' '  if cs==100:' >> subtitles/build_ass.py
+          printf '%s\n' '    cs=0; s+=1' >> subtitles/build_ass.py
+          printf '%s\n' '    if s==60: s=0; m+=1' >> subtitles/build_ass.py
+          printf '%s\n' '    if m==60: m=0; h+=1' >> subtitles/build_ass.py
+          printf '%s\n' '  return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"' >> subtitles/build_ass.py
           printf '%s\n' 'hdr=[' >> subtitles/build_ass.py
-          printf '%s\n' '"[Script Info]","ScriptType: v4.00+","PlayResX: 1080","PlayResY: 1920","ScaledBorderAndShadow: yes","",' >> subtitles/build_ass.py
-          printf '%s\n' '"[V4+ Styles]","Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",' >> subtitles/build_ass.py
-          printf '%s\n' '"Style: TikTok,Arial,62,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2.6,0,2,30,30,50,0","",' >> subtitles/build_ass.py
-          printf '%s\n' '"[Events]","Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"' >> subtitles/build_ass.py
+          printf '%s\n' '"[Script Info]",' >> subtitles/build_ass.py
+          printf '%s\n' '"ScriptType: v4.00+",' >> subtitles/build_ass.py
+          printf '%s\n' '"PlayResX: 1080",' >> subtitles/build_ass.py
+          printf '%s\n' '"PlayResY: 1920",' >> subtitles/build_ass.py
+          printf '%s\n' '"ScaledBorderAndShadow: yes",' >> subtitles/build_ass.py
+          printf '%s\n' '"",' >> subtitles/build_ass.py
+          printf '%s\n' '"[V4+ Styles]",' >> subtitles/build_ass.py
+          printf '%s\n' '"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",' >> subtitles/build_ass.py
+          printf '%s\n' '"Style: TikTok,Arial,62,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2.6,0,2,30,30,50,0",' >> subtitles/build_ass.py
+          printf '%s\n' '"",' >> subtitles/build_ass.py
+          printf '%s\n' '"[Events]",' >> subtitles/build_ass.py
+          printf '%s\n' '"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"' >> subtitles/build_ass.py
+          printf '%s\n' ']' >> subtitles/build_ass.py
           printf '%s\n' 'Path("subtitles/captions.ass").write_text("\n".join(hdr)+"\n",encoding="utf-8")' >> subtitles/build_ass.py
           printf '%s\n' 't=0.0; buf=[]; acc=0.0; out=[]' >> subtitles/build_ass.py
           printf '%s\n' 'for w in words:' >> subtitles/build_ass.py
