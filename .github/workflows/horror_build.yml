@@ -7,8 +7,8 @@ on:
 
 env:
   OUT_NAME: "final_horror.mp4"
-  USER_PROMPT: "Écris un script TikTok ultra immersif de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés."
-  SYSTEM_PROMPT: "Tu écris un script court et ultra immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
+  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+  SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
 
 jobs:
   build:
@@ -97,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' '#!/usr/bin/env python3' > scripts/tts_eleven.py
-          printf '%s\n' 'import os, json, urllib.request' >> scripts/tts_eleven.py
+          printf '%s\n' 'import os, json, urllib.request, subprocess' >> scripts/tts_eleven.py
           printf '%s\n' 'api=os.environ["ELEVENLABS_API_KEY"]' >> scripts/tts_eleven.py
           printf '%s\n' 'vid=os.environ["ELEVENLABS_VOICE_ID"]' >> scripts/tts_eleven.py
           printf '%s\n' 'txt=open("story/story_clean.txt","r",encoding="utf-8").read().strip()' >> scripts/tts_eleven.py
@@ -109,7 +109,7 @@ jobs:
           printf '%s\n' 'with urllib.request.urlopen(req,data=json.dumps(body).encode("utf-8")) as r:' >> scripts/tts_eleven.py
           printf '%s\n' '    audio=r.read()' >> scripts/tts_eleven.py
           printf '%s\n' 'open("audio/voice.mp3","wb").write(audio)' >> scripts/tts_eleven.py
-          printf '%s\n' 'os.system("ffmpeg -nostdin -y -i audio/voice.mp3 -ar 44100 -ac 2 audio/voice.wav >/dev/null 2>&1")' >> scripts/tts_eleven.py
+          printf '%s\n' 'subprocess.check_call(["ffmpeg","-nostdin","-y","-i","audio/voice.mp3","-ar","44100","-ac","2","audio/voice.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' >> scripts/tts_eleven.py
           printf '%s\n' 'print("OK TTS -> audio/voice.wav")' >> scripts/tts_eleven.py
           chmod +x scripts/tts_eleven.py
 
@@ -153,39 +153,48 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' '#!/usr/bin/env python3' > scripts/cover_video.py
-          printf '%s\n' 'import os, glob, random, subprocess, shlex, sys' >> scripts/cover_video.py
+          printf '%s\n' 'import os, glob, random, subprocess' >> scripts/cover_video.py
           printf '%s\n' 'from pathlib import Path' >> scripts/cover_video.py
           printf '%s\n' 'def ffprobe_dur(p):' >> scripts/cover_video.py
           printf '%s\n' '    try:' >> scripts/cover_video.py
-          printf '%s\n' '        cmd=f"ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 {shlex.quote(p)}"' >> scripts/cover_video.py
-          printf '%s\n' '        s=subprocess.check_output(cmd, shell=True, text=True).strip()' >> scripts/cover_video.py
-          printf '%s\n' '        return float(s)' >> scripts/cover_video.py
+          printf '%s\n' '        out = subprocess.check_output([' >> scripts/cover_video.py
+          printf '%s\n' '            "ffprobe","-v","error","-show_entries","format=duration",' >> scripts/cover_video.py
+          printf '%s\n' '            "-of","default=nokey=1:noprint_wrappers=1", p' >> scripts/cover_video.py
+          printf '%s\n' '        ], text=True).strip()' >> scripts/cover_video.py
+          printf '%s\n' '        return float(out)' >> scripts/cover_video.py
           printf '%s\n' '    except Exception:' >> scripts/cover_video.py
           printf '%s\n' '        return 0.0' >> scripts/cover_video.py
-          printf '%s\n' 'def run(cmd): print("RUN:",cmd); subprocess.check.call(cmd, shell=True)' >> scripts/cover_video.py
-          printf '%s\n' 'audio_dur=float(os.environ.get("AUDIO_DUR","0"))' >> scripts/cover_video.py
-          printf '%s\n' 'if audio_dur<=0: print("AUDIO_DUR invalide"); sys.exit(2)' >> scripts/cover_video.py
-          printf '%s\n' 'clips=sorted(glob.glob("bank_video/Horreur/*.mp4"))' >> scripts/cover_video.py
-          printf '%s\n' 'if not clips: print("Pas de clips"); sys.exit(1)' >> scripts/cover_video.py
-          printf '%s\n' 'random.shuffle(clips)' >> scripts/cover_video.py
-          printf '%s\n' 'Path("selected_media").mkdir(parents=True, exist_ok=True)' >> scripts/cover_video.py
-          printf '%s\n' 'open("selected_media/list.txt","w").close()' >> scripts/cover_video.py
-          printf '%s\n' 'total=0.0; seg=0; i=0; n=len(clips)' >> scripts/cover_video.py
-          printf '%s\n' 'while total < audio_dur + 1.0:' >> scripts/cover_video.py
-          printf '%s\n' '    src=clips[i % n]; i+=1' >> scripts/cover_video.py
-          printf '%s\n' '    seg+=1; out=f"selected_media/seg_{seg}.mp4"' >> scripts/cover_video.py
-          printf '%s\n' '    cmd=( "ffmpeg -nostdin -y -i "+shlex.quote(src)+' >> scripts/cover_video.py
-          printf '%s\n' '          " -vf \\"scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1\\"" ' >> scripts/cover_video.py
-          printf '%s\n' '          " -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an " + shlex.quote(out) )' >> scripts/cover_video.py
-          printf '%s\n' '    run(cmd)' >> scripts/cover_video.py
-          printf '%s\n' '    d=ffprobe_dur(out)' >> scripts/cover_video.py
-          printf '%s\n' '    if d<=0: d=10.0' >> scripts/cover_video.py
-          printf '%s\n' '    total+=d' >> scripts/cover_video.py
-          printf '%s\n' '    absout=Path(out).resolve().as_posix()' >> scripts/cover_video.py
-          printf '%s\n' '    with open("selected_media/list.txt","a",encoding="utf-8") as f:' >> scripts/cover_video.py
-          printf '%s\n' '        f.write("file " + chr(39) + absout + chr(39) + "\\n")' >> scripts/cover_video.py
-          printf '%s\n' 'run("ffmpeg -nostdin -y -f concat -safe 0 -i selected_media/list.txt -c copy selected_media/merged_raw.mp4")' >> scripts/cover_video.py
-          printf '%s\n' 'run("ffmpeg -nostdin -y -i selected_media/merged_raw.mp4 -vf \\"setsar=1\\" -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an selected_media/merged.mp4")' >> scripts/cover_video.py
+          printf '%s\n' 'def encode_fit(src, out):' >> scripts/cover_video.py
+          printf '%s\n' '    subprocess.check_call([' >> scripts/cover_video.py
+          printf '%s\n' '        "ffmpeg","-nostdin","-y","-i",src,' >> scripts/cover_video.py
+          printf '%s\n' '        "-vf","scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",' >> scripts/cover_video.py
+          printf '%s\n' '        "-r","30","-c:v","libx264","-crf","18","-pix_fmt","yuv420p","-an",out' >> scripts/cover_video.py
+          printf '%s\n' '    ])' >> scripts/cover_video.py
+          printf '%s\n' 'def main():' >> scripts/cover_video.py
+          printf '%s\n' '    audio_dur=float(os.environ.get("AUDIO_DUR","0") or "0")' >> scripts/cover_video.py
+          printf '%s\n' '    if audio_dur<=0: print("AUDIO_DUR invalide"); raise SystemExit(2)' >> scripts/cover_video.py
+          printf '%s\n' '    clips=sorted(glob.glob("bank_video/Horreur/*.mp4"))' >> scripts/cover_video.py
+          printf '%s\n' '    if not clips: print("Pas de clips"); raise SystemExit(1)' >> scripts/cover_video.py
+          printf '%s\n' '    random.shuffle(clips)' >> scripts/cover_video.py
+          printf '%s\n' '    Path("selected_media").mkdir(parents=True, exist_ok=True)' >> scripts/cover_video.py
+          printf '%s\n' '    open("selected_media/list.txt","w").close()' >> scripts/cover_video.py
+          printf '%s\n' '    total=0.0; seg=0; i=0; n=len(clips)' >> scripts/cover_video.py
+          printf '%s\n' '    while total < audio_dur + 1.0:' >> scripts/cover_video.py
+          printf '%s\n' '        src=clips[i % n]; i+=1' >> scripts/cover_video.py
+          printf '%s\n' '        seg+=1; out=f"selected_media/seg_{seg}.mp4"' >> scripts/cover_video.py
+          printf '%s\n' '        encode_fit(src,out)' >> scripts/cover_video.py
+          printf '%s\n' '        d=ffprobe_dur(out) or 10.0' >> scripts/cover_video.py
+          printf '%s\n' '        total+=d' >> scripts/cover_video.py
+          printf '%s\n' '        absout=Path(out).resolve().as_posix()' >> scripts/cover_video.py
+          printf '%s\n' '        with open("selected_media/list.txt","a",encoding="utf-8") as f:' >> scripts/cover_video.py
+          printf '%s\n' "            f.write(\"file '\"+absout+\"'\\n\")" >> scripts/cover_video.py
+          printf '%s\n' '    subprocess.check_call([' >> scripts/cover_video.py
+          printf '%s\n' '        "ffmpeg","-nostdin","-y","-f","concat","-safe","0","-i","selected_media/list.txt","-c","copy","selected_media/merged_raw.mp4"' >> scripts/cover_video.py
+          printf '%s\n' '    ])' >> scripts/cover_video.py
+          printf '%s\n' '    subprocess.check_call([' >> scripts/cover_video.py
+          printf '%s\n' '        "ffmpeg","-nostdin","-y","-i","selected_media/merged_raw.mp4","-vf","setsar=1","-r","30","-c:v","libx264","-crf","18","-pix_fmt","yuv420p","-an","selected_media/merged.mp4"' >> scripts/cover_video.py
+          printf '%s\n' '    ])' >> scripts/cover_video.py
+          printf '%s\n' 'if __name__=="__main__": main()' >> scripts/cover_video.py
           chmod +x scripts/cover_video.py
 
       - name: Build merged background (cover audio)
