@@ -1,7 +1,14 @@
-﻿name: Build Horror Video (OpenAI + ElevenLabs + ASS + Dropbox)
+﻿name: Horror TikTok Builder (no-heredoc, voice-length-cut)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+env:
+  OUT_NAME: "final_horror.mp4"
+  USER_PROMPT: "Écris un script TikTok ultra immersif de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés."
+  SYSTEM_PROMPT: "Tu écris un script court et ultra immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
 
 jobs:
   build:
@@ -12,246 +19,280 @@ jobs:
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
       DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
-      CLIPS_COUNT: "13"
-      OUT_NAME: "final_horror.mp4"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Installe d'abord les outils nécessaires
-      - name: Install deps (ffmpeg, fonts, jq)
+      - name: Tooling
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg jq fonts-dejavu-core
-
-      # Ensuite seulement, vérifie les secrets et la présence des outils
-      - name: Sanity checks (secrets + tools)
-        run: |
-          set -euo pipefail
-          : "${OPENAI_API_KEY:?OPENAI_API_KEY manquant}"
-          : "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY manquant}"
-          : "${ELEVENLABS_VOICE_ID:?ELEVENLABS_VOICE_ID manquant}"
-          : "${MANIFEST_URL:?MANIFEST_URL manquant}"
-          : "${DROPBOX_ACCESS_TOKEN:?DROPBOX_ACCESS_TOKEN manquant}"
+          sudo apt-get install -y ffmpeg jq curl
           python3 --version
-          ffmpeg -version >/dev/null
-          jq --version >/dev/null
+          ffmpeg -version | head -n 2
 
-
-      - name: Install deps (ffmpeg, fonts, jq)
+      - name: Validate required secrets
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg jq fonts-dejavu-core
+          [ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_API_KEY:-}" ] || { echo "ELEVENLABS_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_VOICE_ID:-}" ] || { echo "ELEVENLABS_VOICE_ID manquant"; exit 1; }
+          [ -n "${MANIFEST_URL:-}" ] || { echo "MANIFEST_URL manquant"; exit 1; }
+          [ -n "${DROPBOX_ACCESS_TOKEN:-}" ] || { echo "DROPBOX_ACCESS_TOKEN manquant"; exit 1; }
 
-      # ===================== STORY (OpenAI) =====================
-      - name: Generate story with OpenAI (FR)
+      - name: Prepare directories
         run: |
           set -euo pipefail
-          mkdir -p story
+          mkdir -p story bank_video/Horreur selected_media audio subtitles final_video scripts
 
-          rm -f story/gen_openai.py
-          printf "%s\n" "import json, pathlib" >> story/gen_openai.py
-          printf "%s\n" "sys_txt = '''Tu écris un script court et ultra immersif d'horreur en français.'''" >> story/gen_openai.py
-          printf "%s\n" "usr_txt = '''Écris un script TikTok ultra immerssif de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés. NE METS AUCUNE DIDASCALIE DU TYPE Intro/Scène/Narrateur/CTA.''' " >> story/gen_openai.py
-          printf "%s\n" "payload={'model':'gpt-4o-mini','temperature':1,'messages':[{'role':'system','content':sys_txt},{'role':'user','content':usr_txt}]}" >> story/gen_openai.py
-          printf "%s\n" "pathlib.Path('story/payload.json').write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')" >> story/gen_openai.py
-
-          python3 story/gen_openai.py
-
-          curl -sS https://api.openai.com/v1/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -d @story/payload.json \
-            -o story/openai.json
-
-          # extraction sans heredoc
-          rm -f story/extract_openai.py
-          printf "%s\n" "import json, pathlib, re" >> story/extract_openai.py
-          printf "%s\n" "j=json.load(open('story/openai.json','r',encoding='utf-8'))" >> story/extract_openai.py
-          printf "%s\n" "txt=(j.get('choices') or [{}])[0].get('message',{}).get('content','')" >> story/extract_openai.py
-          printf "%s\n" "txt=re.sub(r'\s+',' ',txt).strip()" >> story/extract_openai.py
-          printf "%s\n" "pathlib.Path('story/story.txt').write_text(txt,encoding='utf-8')" >> story/extract_openai.py
-
-          python3 story/extract_openai.py
-
-      - name: Clean story (remove stage directions)
+      # ---------- Story (OpenAI) ----------
+      - name: Create story generator (no heredoc)
         run: |
           set -euo pipefail
-          rm -f story/clean.py
-          printf '%s\n' 'import re, pathlib' >> story/clean.py
-          printf '%s\n' 'p=pathlib.Path("story/story.txt")' >> story/clean.py
-          printf '%s\n' 's=p.read_text(encoding="utf-8") if p.exists() else ""' >> story/clean.py
-          printf '%s\n' 's=re.sub(r"(?i)\b(intro|hook|scène|scene|narrateur|cta|conclusion|développement|developpement|seine)\b[:\-]?", "", s)' >> story/clean.py
-          printf '%s\n' 's=re.sub(r"\[[^\]]*\]|\([^\)]*\)", "", s)' >> story/clean.py
-          printf '%s\n' 's=s.replace("“","").replace("”","").replace("\"","")' >> story/clean.py
-          printf '%s\n' 's=re.sub(r"\s+"," ",s).strip()' >> story/clean.py
-          printf '%s\n' 'pathlib.Path("story/clean.txt").write_text(s,encoding="utf-8")' >> story/clean.py
-          python3 story/clean.py
-          [ -s story/clean.txt ] || { echo "Texte nettoyé vide"; exit 1; }
+          printf '%s\n' '#!/usr/bin/env python3' > scripts/gen_story.py
+          printf '%s\n' 'import os, json, urllib.request' >> scripts/gen_story.py
+          printf '%s\n' 'api=os.environ["OPENAI_API_KEY"]' >> scripts/gen_story.py
+          printf '%s\n' 'system=os.environ.get("SYSTEM_PROMPT","")' >> scripts/gen_story.py
+          printf '%s\n' 'user=os.environ.get("USER_PROMPT","")' >> scripts/gen_story.py
+          printf '%s\n' 'payload={"model":"gpt-4o-mini","temperature":1,"messages":[{"role":"system","content":system},{"role":"user","content":user}]}' >> scripts/gen_story.py
+          printf '%s\n' 'req=urllib.request.Request("https://api.openai.com/v1/chat/completions",method="POST")' >> scripts/gen_story.py
+          printf '%s\n' 'req.add_header("Content-Type","application/json")' >> scripts/gen_story.py
+          printf '%s\n' 'req.add_header("Authorization","Bearer "+api)' >> scripts/gen_story.py
+          printf '%s\n' 'with urllib.request.urlopen(req,data=json.dumps(payload).encode("utf-8")) as r:' >> scripts/gen_story.py
+          printf '%s\n' '    j=json.loads(r.read().decode("utf-8"))' >> scripts/gen_story.py
+          printf '%s\n' '    txt=j["choices"][0]["message"]["content"].strip()' >> scripts/gen_story.py
+          printf '%s\n' 'open("story/story.txt","w",encoding="utf-8").write(txt+"\n")' >> scripts/gen_story.py
+          chmod +x scripts/gen_story.py
 
-      # ===================== TTS (ElevenLabs) =====================
-      - name: TTS with ElevenLabs + duration
+      - name: Generate story
         run: |
           set -euo pipefail
-          mkdir -p audio
+          python3 scripts/gen_story.py
+          [ -s story/story.txt ] || { echo "Story vide"; exit 1; }
 
-          rm -f audio/mk_payload.py
-          printf '%s\n' 'import json, pathlib' >> audio/mk_payload.py
-          printf '%s\n' 'txt=pathlib.Path("story/clean.txt").read_text(encoding="utf-8")' >> audio/mk_payload.py
-          printf '%s\n' 'payload={"text":txt,"model_id":"eleven_multilingual_v2","voice_settings":{"stability":0.4,"similarity_boost":0.75}}' >> audio/mk_payload.py
-          printf '%s\n' 'pathlib.Path("audio/tts_payload.json").write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")' >> audio/mk_payload.py
-
-          python3 audio/mk_payload.py
-
-          curl -sS -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
-            -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
-            -H "Content-Type: application/json" \
-            --data-binary @audio/tts_payload.json \
-            -o audio/voice.mp3
-
-          ffmpeg -nostdin -y -i audio/voice.mp3 -ar 44100 -ac 2 audio/voice.wav
-          ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 audio/voice.wav | tr -d '\r' > audio/voice_duration.txt
-          [ -s audio/voice_duration.txt ] || { echo "Durée voix introuvable"; exit 1; }
-
-      # ===================== MEDIA (manifest -> dl -> encode -> merge) =====================
-      - name: Download manifest + clips, encode & merge (1080x1920/30)
+      - name: Create story cleaner (no heredoc)
         run: |
           set -euo pipefail
-          mkdir -p selected_media
-          curl -sS -fL "${MANIFEST_URL}" -o selected_media/manifest.txt
-          [ -s selected_media/manifest.txt ] || { echo "Manifest vide"; exit 1; }
+          printf '%s\n' '#!/usr/bin/env python3' > scripts/clean_story.py
+          printf '%s\n' '# -*- coding: utf-8 -*-' >> scripts/clean_story.py
+          printf '%s\n' 'import re' >> scripts/clean_story.py
+          printf '%s\n' 'raw=open("story/story.txt","r",encoding="utf-8").read()' >> scripts/clean_story.py
+          printf '%s\n' 'pats=[r"\\b(intro(?:duction)?|hook|sc[èe]ne|scene|narrateur|cta|conclusion|d[ée]veloppement)\\b\\s*[:\\-]?", r"\\b(seine)\\b"]' >> scripts/clean_story.py
+          printf '%s\n' 'txt=raw' >> scripts/clean_story.py
+          printf '%s\n' 'for p in pats: txt=re.sub(p,"",txt,flags=re.IGNORECASE)' >> scripts/clean_story.py
+          printf '%s\n' 'txt=re.sub(r"\\s+([,;:.!?])",r"\\1",txt)' >> scripts/clean_story.py
+          printf '%s\n' 'txt=re.sub(r"\\s{2,}"," ",txt).strip()' >> scripts/clean_story.py
+          printf '%s\n' 'open("story/story_clean.txt","w",encoding="utf-8").write(txt+"\n")' >> scripts/clean_story.py
+          chmod +x scripts/clean_story.py
 
-          # sélection sans heredoc
-          rm -f selected_media/select_urls.py
-          printf '%s\n' 'import random, pathlib, os, sys' >> selected_media/select_urls.py
-          printf '%s\n' 'p=pathlib.Path("selected_media/manifest.txt")' >> selected_media/select_urls.py
-          printf '%s\n' 'urls=[u.strip() for u in p.read_text(encoding="utf-8").splitlines() if u.strip() and not u.strip().startswith("#")]' >> selected_media/select_urls.py
-          printf '%s\n' 'n=int(os.environ.get("CLIPS_COUNT","13"))' >> selected_media/select_urls.py
-          printf '%s\n' 'random.shuffle(urls); sel=urls[:max(1,min(n,len(urls)))]' >> selected_media/select_urls.py
-          printf '%s\n' 'pathlib.Path("selected_media/urls.txt").write_text("\n".join(sel),encoding="utf-8")' >> selected_media/select_urls.py
-          python3 selected_media/select_urls.py
+      - name: Clean story (remove didascalies)
+        run: |
+          set -euo pipefail
+          python3 scripts/clean_story.py
+          [ -s story/story_clean.txt ] || { echo "story_clean.txt vide"; exit 1; }
 
-          cd selected_media
-          rm -f list.txt
+      # ---------- ElevenLabs TTS ----------
+      - name: Create ElevenLabs TTS (no heredoc)
+        run: |
+          set -euo pipefail
+          printf '%s\n' '#!/usr/bin/env python3' > scripts/tts_eleven.py
+          printf '%s\n' 'import os, json, urllib.request' >> scripts/tts_eleven.py
+          printf '%s\n' 'api=os.environ["ELEVENLABS_API_KEY"]' >> scripts/tts_eleven.py
+          printf '%s\n' 'vid=os.environ["ELEVENLABS_VOICE_ID"]' >> scripts/tts_eleven.py
+          printf '%s\n' 'txt=open("story/story_clean.txt","r",encoding="utf-8").read().strip()' >> scripts/tts_eleven.py
+          printf '%s\n' 'url="https://api.elevenlabs.io/v1/text-to-speech/"+vid' >> scripts/tts_eleven.py
+          printf '%s\n' 'body={"text":txt,"model_id":"eleven_multilingual_v2","voice_settings":{"stability":0.4,"similarity_boost":0.8}}' >> scripts/tts_eleven.py
+          printf '%s\n' 'req=urllib.request.Request(url,method="POST")' >> scripts/tts_eleven.py
+          printf '%s\n' 'req.add_header("Content-Type","application/json")' >> scripts/tts_eleven.py
+          printf '%s\n' 'req.add_header("xi-api-key",api)' >> scripts/tts_eleven.py
+          printf '%s\n' 'with urllib.request.urlopen(req,data=json.dumps(body).encode("utf-8")) as r:' >> scripts/tts_eleven.py
+          printf '%s\n' '    audio=r.read()' >> scripts/tts_eleven.py
+          printf '%s\n' 'open("audio/voice.mp3","wb").write(audio)' >> scripts/tts_eleven.py
+          printf '%s\n' 'os.system("ffmpeg -nostdin -y -i audio/voice.mp3 -ar 44100 -ac 2 audio/voice.wav >/dev/null 2>&1")' >> scripts/tts_eleven.py
+          printf '%s\n' 'print("OK TTS -> audio/voice.wav")' >> scripts/tts_eleven.py
+          chmod +x scripts/tts_eleven.py
+
+      - name: Generate voice
+        run: |
+          set -euo pipefail
+          python3 scripts/tts_eleven.py
+          [ -s audio/voice.wav ] || { echo "voice.wav manquant"; exit 1; }
+
+      - name: Measure audio duration
+        id: aud
+        run: |
+          set -euo pipefail
+          Adur="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio/voice.wav)"
+          echo "Audio duration: ${Adur}"
+          echo "Adur=${Adur:-0}" >> "$GITHUB_OUTPUT"
+
+      # ---------- Download bank clips ----------
+      - name: Download manifest list
+        run: |
+          set -euo pipefail
+          curl -fsSL "${MANIFEST_URL}" -o selected_media/manifest_urls.txt
+          [ -s selected_media/manifest_urls.txt ] || { echo "Manifest vide via MANIFEST_URL"; exit 1; }
+
+      - name: Fetch videos from manifest
+        run: |
+          set -euo pipefail
           i=0
-          while IFS= read -r URL; do
-            [ -n "$URL" ] || continue
-            case "$URL" in \#*) continue;; esac
+          while IFS= read -r url; do
+            case "$url" in ""|\#*) continue;; esac
             i=$((i+1))
-            SRC="src_${i}.mp4"
-            OUT="seg_${i}.mp4"
-            curl -sS -fL "$URL" -o "$SRC"
-            ffmpeg -nostdin -y -i "$SRC" \
-              -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1" \
-              -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an "$OUT"
-            printf "file '%s'\n" "$OUT" >> list.txt
-          done < urls.txt
+            out="bank_video/Horreur/clip_${i}.mp4"
+            echo "DL $url -> $out"
+            curl -fL --retry 3 --retry-all-errors -o "$out" "$url"
+          done < selected_media/manifest_urls.txt
+          cnt=$(ls -1 bank_video/Horreur/*.mp4 2>/dev/null | wc -l)
+          [ "$cnt" -ge 1 ] || { echo "Aucune vidéo après téléchargement"; exit 1; }
 
-          [ -s list.txt ] || { echo "Aucun segment encodé"; exit 1; }
-          ffmpeg -nostdin -y -f concat -safe 0 -i list.txt -c copy merged.mp4
-
-          Vdur="$(ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 merged.mp4 | tr -d '\r')"
-          Adur="$(cat ../audio/voice_duration.txt | tr -d '\r')"
-          EXTRA="$(python3 -c 'import sys; v=float(sys.argv[1]); a=float(sys.argv[2]); print(max(0.0, a - v + 0.6))' "$Vdur" "$Adur")"
-          PAD_NEED="$(python3 -c 'import sys; x=float(sys.argv[1]); print(1 if x>0.05 else 0)' "$EXTRA")"
-          if [ "$PAD_NEED" = "1" ]; then
-            ffmpeg -nostdin -y -f lavfi -i "color=c=black:s=1080x1920:d=${EXTRA}" -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an outro.mp4
-            rm -f full_list.txt
-            printf "file '%s'\n" "merged.mp4" > full_list.txt
-            printf "file '%s'\n" "outro.mp4" >> full_list.txt
-            ffmpeg -nostdin -y -f concat -safe 0 -i full_list.txt -c copy merged.mp4
-          fi
-          cd ..
-
-      # ===================== SUBTITLES (karaoke .ass) =====================
-      - name: Build captions.ass (karaoke)
+      # ---------- Build background to cover voice (no black, unlimited clips) ----------
+      - name: Create cover-video builder (no heredoc)
         run: |
           set -euo pipefail
-          mkdir -p subtitles
-          rm -f subtitles/build_ass.py
+          printf '%s\n' '#!/usr/bin/env python3' > scripts/cover_video.py
+          printf '%s\n' 'import os, glob, random, subprocess, shlex, sys' >> scripts/cover_video.py
+          printf '%s\n' 'from pathlib import Path' >> scripts/cover_video.py
+          printf '%s\n' 'def ffprobe_dur(p):' >> scripts/cover_video.py
+          printf '%s\n' '    try:' >> scripts/cover_video.py
+          printf '%s\n' '        cmd=f"ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 {shlex.quote(p)}"' >> scripts/cover_video.py
+          printf '%s\n' '        s=subprocess.check_output(cmd, shell=True, text=True).strip()' >> scripts/cover_video.py
+          printf '%s\n' '        return float(s)' >> scripts/cover_video.py
+          printf '%s\n' '    except Exception:' >> scripts/cover_video.py
+          printf '%s\n' '        return 0.0' >> scripts/cover_video.py
+          printf '%s\n' 'def run(cmd): print("RUN:",cmd); subprocess.check.call(cmd, shell=True)' >> scripts/cover_video.py
+          printf '%s\n' 'audio_dur=float(os.environ.get("AUDIO_DUR","0"))' >> scripts/cover_video.py
+          printf '%s\n' 'if audio_dur<=0: print("AUDIO_DUR invalide"); sys.exit(2)' >> scripts/cover_video.py
+          printf '%s\n' 'clips=sorted(glob.glob("bank_video/Horreur/*.mp4"))' >> scripts/cover_video.py
+          printf '%s\n' 'if not clips: print("Pas de clips"); sys.exit(1)' >> scripts/cover_video.py
+          printf '%s\n' 'random.shuffle(clips)' >> scripts/cover_video.py
+          printf '%s\n' 'Path("selected_media").mkdir(parents=True, exist_ok=True)' >> scripts/cover_video.py
+          printf '%s\n' 'open("selected_media/list.txt","w").close()' >> scripts/cover_video.py
+          printf '%s\n' 'total=0.0; seg=0; i=0; n=len(clips)' >> scripts/cover_video.py
+          printf '%s\n' 'while total < audio_dur + 1.0:' >> scripts/cover_video.py
+          printf '%s\n' '    src=clips[i % n]; i+=1' >> scripts/cover_video.py
+          printf '%s\n' '    seg+=1; out=f"selected_media/seg_{seg}.mp4"' >> scripts/cover_video.py
+          printf '%s\n' '    cmd=( "ffmpeg -nostdin -y -i "+shlex.quote(src)+' >> scripts/cover_video.py
+          printf '%s\n' '          " -vf \\"scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1\\"" ' >> scripts/cover_video.py
+          printf '%s\n' '          " -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an " + shlex.quote(out) )' >> scripts/cover_video.py
+          printf '%s\n' '    run(cmd)' >> scripts/cover_video.py
+          printf '%s\n' '    d=ffprobe_dur(out)' >> scripts/cover_video.py
+          printf '%s\n' '    if d<=0: d=10.0' >> scripts/cover_video.py
+          printf '%s\n' '    total+=d' >> scripts/cover_video.py
+          printf '%s\n' '    absout=Path(out).resolve().as_posix()' >> scripts/cover_video.py
+          printf '%s\n' '    with open("selected_media/list.txt","a",encoding="utf-8") as f:' >> scripts/cover_video.py
+          printf '%s\n' '        f.write("file " + chr(39) + absout + chr(39) + "\\n")' >> scripts/cover_video.py
+          printf '%s\n' 'run("ffmpeg -nostdin -y -f concat -safe 0 -i selected_media/list.txt -c copy selected_media/merged_raw.mp4")' >> scripts/cover_video.py
+          printf '%s\n' 'run("ffmpeg -nostdin -y -i selected_media/merged_raw.mp4 -vf \\"setsar=1\\" -r 30 -c:v libx264 -crf 18 -pix_fmt yuv420p -an selected_media/merged.mp4")' >> scripts/cover_video.py
+          chmod +x scripts/cover_video.py
 
-          printf '%s\n' 'import re, math' >> subtitles/build_ass.py
-          printf '%s\n' 'from pathlib import Path' >> subtitles/build_ass.py
-          printf '%s\n' 'dur=float(Path("audio/voice_duration.txt").read_text().strip())' >> subtitles/build_ass.py
-          printf '%s\n' 'p_clean=Path("story/clean.txt")' >> subtitles/build_ass.py
-          printf '%s\n' 'txt=(p_clean.read_text(encoding="utf-8") if p_clean.exists() else Path("story/story.txt").read_text(encoding="utf-8"))' >> subtitles/build_ass.py
-          printf '%s\n' 'txt=re.sub(r"(?i)\b(intro|hook|scène|scene|narrateur|cta|conclusion|développement)\b[:\-]?", "", txt)' >> subtitles/build_ass.py
-          printf '%s\n' 'txt=re.sub(r"\s+"," ",txt).strip()' >> subtitles/build_ass.py
-          printf '%s\n' 'words=re.findall(r"\S+", txt); n=len(words)' >> subtitles/build_ass.py
-          printf '%s\n' 'if n==0: Path("subtitles/captions.ass").write_text("",encoding="utf-8"); raise SystemExit(0)' >> subtitles/build_ass.py
-          printf '%s\n' 'per=max(dur/max(n/6,1), 0.35); MINL,MAXL=2.0,4.0' >> subtitles/build_ass.py
-
-          printf '%s\n' 'def ts(x):' >> subtitles/build_ass.py
-          printf '%s\n' '  total=max(0.0,float(x))' >> subtitles/build_ass.py
-          printf '%s\n' '  h=int(total//3600); m=int((total%3600)//60); s=int(total%60)' >> subtitles/build_ass.py
-          printf '%s\n' '  cs=int(round((total-int(total))*100))' >> subtitles/build_ass.py
-          printf '%s\n' '  if cs==100: cs=0; s+=1' >> subtitles/build_ass.py
-          printf '%s\n' '  if s==60: s=0; m+=1' >> subtitles/build_ass.py
-          printf '%s\n' '  if m==60: m=0; h+=1' >> subtitles/build_ass.py
-          printf '%s\n' '  return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"' >> subtitles/build_ass.py
-
-          printf '%s\n' 'hdr=["[Script Info]","ScriptType: v4.00+","PlayResX: 1080","PlayResY: 1920","ScaledBorderAndShadow: yes","",' >> subtitles/build_ass.py
-          printf '%s\n' '"[V4+ Styles]","Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",' >> subtitles/build_ass.py
-          printf '%s\n' '"Style: TikTok,DejaVu Sans,62,&H00FFFFFF,&H00404040,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2.8,0.6,2,30,30,54,0","","[Events]","Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]' >> subtitles/build_ass.py
-          printf '%s\n' 'Path("subtitles/captions.ass").write_text("\n".join(hdr)+"\n", encoding="utf-8")' >> subtitles/build_ass.py
-
-          printf '%s\n' 't=0.0; acc=0.0; buf=[]; lines=[]' >> subtitles/build_ass.py
-          printf '%s\n' 'for w in words:' >> subtitles/build_ass.py
-          printf '%s\n' '  buf.append(w); acc+=per' >> subtitles/build_ass.py
-          printf '%s\n' '  if (acc>=MINL and (acc>=MAXL or len(buf)>=8)):' >> subtitles/build_ass.py
-          printf '%s\n' '    s=t; e=min(t+acc, dur); lines.append((s,e,buf[:])); t=e; buf=[]; acc=0.0' >> subtitles/build_ass.py
-          printf '%s\n' 'if buf: s=t; e=min(t+max(acc,1.4), dur); lines.append((s,e,buf[:]))' >> subtitles/build_ass.py
-
-          printf '%s\n' 'with open("subtitles/captions.ass","a",encoding="utf-8") as f:' >> subtitles/build_ass.py
-          printf '%s\n' '  for s,e,ws in lines:' >> subtitles/build_ass.py
-          printf '%s\n' '    total=max(0.8, e-s); lens=[max(1,len(x)) for x in ws]; L=sum(lens)' >> subtitles/build_ass.py
-          printf '%s\n' '    cs=[max(1,int(round(total*100*l/L))) for l in lens]; diff=int(round(total*100))-sum(cs)' >> subtitles/build_ass.py
-          printf '%s\n' '    if diff!=0: cs[-1]+=diff' >> subtitles/build_ass.py
-          printf '%s\n' '    kara="".join([f"{\\k%s}"%k + w + " " for w,k in zip(ws,cs)]).rstrip()' >> subtitles/build_ass.py
-          printf '%s\n' '    f.write(f"Dialogue: 0,{ts(s)},{ts(e)},TikTok,,0,0,0,,{kara}\n")' >> subtitles/build_ass.py
-
-          python3 subtitles/build_ass.py
-          [ -s subtitles/captions.ass ] || { echo "ASS vide"; exit 1; }
-
-      # ===================== RENDER =====================
-      - name: Render final (burn ASS + audio)
+      - name: Build merged background (cover audio)
         run: |
           set -euo pipefail
-          mkdir -p final_video
-          ffmpeg -nostdin -y \
-            -i selected_media/merged.mp4 \
-            -i audio/voice.wav \
+          AUDIO_DUR="${{ steps.aud.outputs.Adur }}"
+          [ -n "${AUDIO_DUR:-}" ] || { echo "AUDIO_DUR manquant"; exit 1; }
+          [ "${AUDIO_DUR}" != "0" ] || { echo "AUDIO_DUR=0"; exit 1; }
+          AUDIO_DUR="$AUDIO_DUR" python3 scripts/cover_video.py
+          [ -s selected_media/merged.mp4 ] || { echo "merged.mp4 manquant"; exit 1; }
+
+      # ---------- Subtitles (ASS karaoke) ----------
+      - name: Create ASS builder (no heredoc)
+        run: |
+          set -euo pipefail
+          printf '%s\n' '#!/usr/bin/env python3' > scripts/build_ass.py
+          printf '%s\n' '# -*- coding: utf-8 -*-' >> scripts/build_ass.py
+          printf '%s\n' 'import sys, re' >> scripts/build_ass.py
+          printf '%s\n' 'from pathlib import Path' >> scripts/build_ass.py
+          printf '%s\n' 'def ass_time(t):' >> scripts/build_ass.py
+          printf '%s\n' '    if t<0: t=0.0' >> scripts/build_ass.py
+          printf '%s\n' '    h=int(t//3600); m=int((t%3600)//60); s=int(t%60); cs=int(round((t-int(t))*100))' >> scripts/build_ass.py
+          printf '%s\n' '    if cs==100: s+=1; cs=0' >> scripts/build_ass.py
+          printf '%s\n' '    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"' >> scripts/build_ass.py
+          printf '%s\n' 'def split_words_to_lines(words,total_dur):' >> scripts/build_ass.py
+          printf '%s\n' '    total_dur=max(float(total_dur),8.0)' >> scripts/build_ass.py
+          printf '%s\n' '    lens=[max(1,len(w)) for w in words]' >> scripts/build_ass.py
+          printf '%s\n' '    sL=sum(lens)' >> scripts/build_ass.py
+          printf '%s\n' '    per=[total_dur*(L/sL) for L in lens]' >> scripts/build_ass.py
+          printf '%s\n' '    per_cs=[max(8,int(round(x*100))) for x in per]' >> scripts/build_ass.py
+          printf '%s\n' '    out=[]; bufw=[]; bufk=[]; t=0.0; acc=0' >> scripts/build_ass.py
+          printf '%s\n' '    min_line_cs=int(2.0*100); max_words_line=8' >> scripts/build_ass.py
+          printf '%s\n' '    for w,k in zip(words,per_cs):' >> scripts/build_ass.py
+          printf '%s\n' '        bufw.append(w); bufk.append(k); acc+=k' >> scripts/build_ass.py
+          printf '%s\n' '        if acc>=min_line_cs or len(bufw)>=max_words_line:' >> scripts/build_ass.py
+          printf '%s\n' '            s=t; e=t+acc/100.0' >> scripts/build_ass.py
+          printf '%s\n' '            out.append((s,e,list(zip(bufw,bufk))))' >> scripts/build_ass.py
+          printf '%s\n' '            t=e; bufw=[]; bufk=[]; acc=0' >> scripts/build_ass.py
+          printf '%s\n' '    if bufw:' >> scripts/build_ass.py
+          printf '%s\n' '        s=t; e=t+max(acc/100.0,1.2)' >> scripts/build_ass.py
+          printf '%s\n' '        out.append((s,e,list(zip(bufw,bufk))))' >> scripts/build_ass.py
+          printf '%s\n' '    return out' >> scripts/build_ass.py
+          printf '%s\n' 'def main():' >> scripts/build_ass.py
+          printf '%s\n' '    if len(sys.argv)<2: print("Usage: build_ass.py <dur_sec>",file=sys.stderr); sys.exit(2)' >> scripts/build_ass.py
+          printf '%s\n' '    dur=float(sys.argv[1])' >> scripts/build_ass.py
+          printf '%s\n' '    p=Path("story/story_clean.txt")' >> scripts/build_ass.py
+          printf '%s\n' '    if not p.is_file(): print("story_clean.txt introuvable",file=sys.stderr); sys.exit(1)' >> scripts/build_ass.py
+          printf '%s\n' '    text=p.read_text(encoding="utf-8").strip()' >> scripts/build_ass.py
+          printf '%s\n' '    words=[w for w in re.findall(r"[^\\s]+", text) if w]' >> scripts/build_ass.py
+          printf '%s\n' '    if not words: print("Texte vide",file=sys.stderr); sys.exit(1)' >> scripts/build_ass.py
+          printf '%s\n' '    lines=split_words_to_lines(words,dur)' >> scripts/build_ass.py
+          printf '%s\n' '    hdr=[' >> scripts/build_ass.py
+          printf '%s\n' '        "[Script Info]","Title: TikTok Horror","ScriptType: v4.00+",' >> scripts/build_ass.py
+          printf '%s\n' '        "PlayResX: 1080","PlayResY: 1920","WrapStyle: 2","ScaledBorderAndShadow: yes","YCbCr Matrix: TV.709","",' >> scripts/build_ass.py
+          printf '%s\n' '        "[V4+ Styles]",' >> scripts/build_ass.py
+          printf '%s\n' '        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",' >> scripts/build_ass.py
+          printf '%s\n' '        "Style: TikTok,Arial,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,0,2,40,40,96,1","",' >> scripts/build_ass.py
+          printf '%s\n' '        "[Events]","Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",' >> scripts/build_ass.py
+          printf '%s\n' '    ]' >> scripts/build_ass.py
+          printf '%s\n' '    out=Path("subtitles/captions.ass"); out.parent.mkdir(parents=True,exist_ok=True)' >> scripts/build_ass.py
+          printf '%s\n' '    with out.open("w",encoding="utf-8") as f:' >> scripts/build_ass.py
+          printf '%s\n' '        for h in hdr: f.write(h+"\\n")' >> scripts/build_ass.py
+          printf '%s\n' '        for s,e,wk in lines:' >> scripts/build_ass.py
+          printf '%s\n' '            kara="".join([r"{\\k%d}%s " % (k,w) for (w,k) in wk]).rstrip()' >> scripts/build_ass.py
+          printf '%s\n' '            f.write(f"Dialogue: 0,{ass_time(s)},{ass_time(e)},TikTok,,0,0,0,,{kara}\\n")' >> scripts/build_ass.py
+          printf '%s\n' '    print(out.as_posix())' >> scripts/build_ass.py
+          printf '%s\n' 'if __name__=="__main__": main()' >> scripts/build_ass.py
+          chmod +x scripts/build_ass.py
+
+      - name: Build subtitles (ASS)
+        run: |
+          set -euo pipefail
+          VOICE_DUR="${{ steps.aud.outputs.Adur }}"
+          python3 scripts/build_ass.py "$VOICE_DUR"
+          [ -s subtitles/captions.ass ] || { echo "captions.ass manquant"; exit 1; }
+
+      # ---------- Final render ----------
+      - name: Render final
+        run: |
+          set -euo pipefail
+          Adur="${{ steps.aud.outputs.Adur }}"
+          ffmpeg -nostdin -y -i selected_media/merged.mp4 -i audio/voice.wav \
             -vf "subtitles=subtitles/captions.ass" \
-            -map 0:v:0 -map 1:a:0 \
+            -map 0:v:0 -map 1:a:0 -t "${Adur}" \
             -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
-            -c:a aac -b:a 192k -shortest "final_video/${OUT_NAME}"
-          [ -s "final_video/${OUT_NAME}" ] || { echo "Rendu final absent"; exit 1; }
+            -c:a aac -b:a 192k "final_video/${OUT_NAME}"
+          [ -s "final_video/${OUT_NAME}" ] || { echo "final video manquante"; exit 1; }
 
-      - name: Upload artifacts (media, audio, subs, final)
+      - name: Upload artifact (final video)
         uses: actions/upload-artifact@v4
         with:
-          name: build_outputs
-          path: |
-            selected_media/
-            audio/
-            subtitles/
-            final_video/
+          name: final_video
+          path: final_video/
 
-      # ===================== DROPBOX =====================
-      - name: Upload to Dropbox + link
+      # ---------- Dropbox upload (no heredoc) ----------
+      - name: Upload to Dropbox & share link
         run: |
           set -euo pipefail
           : "${DROPBOX_ACCESS_TOKEN:?DROPBOX_ACCESS_TOKEN manquant}"
           : "${OUT_NAME:?OUT_NAME manquant}"
-          FILE="final_video/${OUT_NAME}"
-          [ -s "$FILE" ] || { echo "Fichier absent: $FILE"; exit 1; }
 
-          TOKEN="${DROPBOX_ACCESS_TOKEN}"
+          FILE="final_video/${OUT_NAME}"
+          [ -s "$FILE" ] || { echo "Fichier manquant: $FILE"; exit 1; }
+
+          TOKEN="$DROPBOX_ACCESS_TOKEN"
           REMOTE_DIR="/horror"
-          TS="$(date +'%Y%m%d_%H%M%S')"
+          TS="$(date +"%Y%m%d_%H%M%S")"
           REMOTE_PATH="${REMOTE_DIR}/${TS}_${OUT_NAME}"
           SIZE="$(stat -c%s "$FILE")"
           mkdir -p final_video
@@ -264,15 +305,16 @@ jobs:
               -H "Content-Type: application/octet-stream" \
               --data-binary @"${FILE}" \
               -o /tmp/dbx_upload.json -w '%{http_code}')
-            [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ] || { echo "Upload Dropbox échec http=$CODE"; cat /tmp/dbx_upload.json || true; exit 1; }
+            [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ] || { echo "Échec upload Dropbox"; cat /tmp/dbx_upload.json || true; exit 1; }
           else
             CHUNK=$((15*1024*1024))
-            SID=$(curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/start" \
+            curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/start" \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Content-Type: application/octet-stream" \
               -H 'Dropbox-API-Arg: {"close": false}' \
-              --data-binary "" | python3 -c 'import sys,json; s=sys.stdin.read().strip(); print(json.loads(s)["session_id"] if s else "", end="")' 2>/dev/null || true)
-            [ -n "${SID:-}" ] || { echo "Session upload Dropbox KO"; exit 1; }
+              --data-binary "" -o /tmp/dbx_start.json
+            SID="$(jq -r '.session_id // empty' /tmp/dbx_start.json)"
+            [ -n "$SID" ] || { echo "Impossible d'ouvrir une session d'upload"; cat /tmp/dbx_start.json || true; exit 1; }
 
             OFF=0; I=0
             while [ "$OFF" -lt "$SIZE" ]; do
@@ -284,41 +326,41 @@ jobs:
                 --data-binary @- >/dev/null
               OFF=$((OFF+CHUNK)); I=$((I+1))
             done
-
             COMMIT=$(printf '{ "cursor": {"session_id": "%s", "offset": %s}, "commit": {"path": "%s", "mode": "add", "autorename": true, "mute": false} }' "$SID" "$SIZE" "$REMOTE_PATH")
             CODE=$(curl -sS -X POST "https://content.dropboxapi.com/2/files/upload_session/finish" \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Content-Type: application/octet-stream" \
               -H "Dropbox-API-Arg: ${COMMIT}" \
               --data-binary "" -o /tmp/dbx_finish.json -w '%{http_code}')
-            [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ] || { echo "Finalisation upload Dropbox KO http=$CODE"; cat /tmp/dbx_finish.json || true; exit 1; }
+            [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ] || { echo "Échec finalisation upload Dropbox"; cat /tmp/dbx_finish.json || true; exit 1; }
           fi
 
-          PAYLOAD=$(printf '{"path":"%s"}' "$REMOTE_PATH")
+          printf '{"path":"%s"}' "$REMOTE_PATH" > /tmp/dbx_payload.json
           CODE=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings" \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
-            --data "$PAYLOAD" -o /tmp/dbx_link.json -w '%{http_code}')
+            --data @/tmp/dbx_payload.json \
+            -o /tmp/dbx_link.json -w '%{http_code}')
+
           URL=""
-          if [ -s /tmp/dbx_link.json ]; then
-            URL=$(python3 -c 'import sys,json; s=open("/tmp/dbx_link.json","r",encoding="utf-8").read().strip(); print(json.loads(s).get("url","") if s else "", end="")' 2>/dev/null || true)
-          fi
-          if [ -z "$URL" ]; then
-            CODE=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/list_shared_links" \
+          if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
+            URL="$(jq -r '.url // empty' /tmp/dbx_link.json)"
+          else
+            printf '{"path":"%s","direct_only":true}' "$REMOTE_PATH" > /tmp/dbx_list_payload.json
+            curl -sS -X POST "https://api.dropboxapi.com/2/sharing/list_shared_links" \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Content-Type: application/json" \
-              --data "{\"path\":\"${REMOTE_PATH}\",\"direct_only\":true}" -o /tmp/dbx_list.json -w '%{http_code}')
-            if [ -s /tmp/dbx_list.json ]; then
-              URL=$(python3 -c 'import sys,json; s=open("/tmp/dbx_list.json","r",encoding="utf-8").read().strip(); j=json.loads(s) if s else {}; print(((j.get("links") or [{}])[0].get("url","")), end="")' 2>/dev/null || true)
-            fi
+              --data @/tmp/dbx_list_payload.json \
+              -o /tmp/dbx_list.json
+            URL="$(jq -r '.links[0].url // empty' /tmp/dbx_list.json)"
           fi
-          [ -n "$URL" ] || { echo "Lien Dropbox indisponible"; exit 1; }
 
+          [ -n "$URL" ] || { echo "Impossible d'obtenir un lien Dropbox"; cat /tmp/dbx_link.json || true; exit 1; }
           LINK_DL="${URL/\?dl=0/?dl=1}"
           printf '%s\n' "$LINK_DL" > final_video/dropbox_link.txt
           echo "Dropbox direct link: $LINK_DL"
 
-      - name: Upload artifact (Dropbox link)
+      - name: Upload artifact (dropbox link)
         uses: actions/upload-artifact@v4
         with:
           name: dropbox_link
