@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install deps (ffmpeg, jq, coreutils)
+      - name: Install deps (ffmpeg, jq)
         shell: bash
         run: |
           set -euo pipefail
@@ -33,14 +33,11 @@ jobs:
           mkdir -p bank_video/Horreur
           if [ -n "${MANIFEST_URL:-}" ]; then
             TMP="$(mktemp)"
-            # Si MANIFEST_URL pointe vers un fichier texte en ligne (1 URL par ligne)
             if curl -fsSL "$MANIFEST_URL" -o "$TMP"; then
               awk 'NF{print $0}' "$TMP" > manifest_urls.txt
             else
-              # Sinon, traite MANIFEST_URL comme une liste d’URLs séparées par espaces/nouvelles lignes
               printf '%s\n' $MANIFEST_URL > manifest_urls.txt
             fi
-            # Téléchargements
             i=0
             while IFS= read -r u; do
               [ -n "$u" ] || continue
@@ -53,7 +50,6 @@ jobs:
               curl -fsSL "$u" -o "bank_video/Horreur/$fn"
             done < manifest_urls.txt
           fi
-          # Vérification d’au moins 2 sources
           CNT=$(find bank_video/Horreur -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')
           if [ "$CNT" -lt 2 ]; then
             echo "Il faut au moins 2 vidéos MP4 dans bank_video/Horreur (actuellement: $CNT)."
@@ -69,7 +65,7 @@ jobs:
           : "${OPENAI_API_KEY:?OPENAI_API_KEY manquant}"
           mkdir -p story
           SYS="Tu écris un script court et immersif d'horreur en français. Aucune didascalie. N'utilise jamais des mots comme Scène, Narrateur, Hook, Intro, CTA, Caméra. Uniquement la narration immersive à la première personne."
-          USER="Écris un script Tiktok immersif de 180 à 200 mots (65-75s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés. Pas de didascalies, uniquement la narration."
+          USER="Écris un script TikTok immersif de 180 à 200 mots (65-75s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés. Pas de didascalies, uniquement la narration."
           jq -n --arg sys "$SYS" --arg user "$USER" \
             '{model:"gpt-4o",temperature:1,messages:[{role:"system",content:$sys},{role:"user",content:$user}]}' \
             > story/payload.json
@@ -123,7 +119,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p subtitles
-          # Header ASS
           {
             printf '%s\n' '[Script Info]'
             printf '%s\n' 'ScriptType: v4.00+'
@@ -138,11 +133,9 @@ jobs:
             printf '%s\n' 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
           } > subtitles/captions.ass
 
-          # Durée audio
           D=$(ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 audio/voice.wav || echo "")
           [ -n "$D" ] || D=60
 
-          # Segmentation ~5 mots/ligne, calée sur la durée
           awk -v dur="$D" '
             function ts(x,  h,m,s,cs){h=int(x/3600);m=int((x%3600)/60);s=int(x%60);cs=int((x-int(x))*100);return sprintf("%01d:%02d:%02d.%02d",h,m,s,cs)}
             BEGIN{FS="[ \t]+"}
@@ -177,7 +170,7 @@ jobs:
           [ "${#ALL[@]}" -gt 0 ] || { echo "Aucun .mp4 dans bank_video/Horreur"; exit 1; }
 
           mapfile -t SEL < <(printf '%s\n' "${ALL[@]}" | shuf | head -n "$CLIPS_COUNT")
-          [ "${#SEL[@]}" -ge 2 ] || { echo "Moins de 2 vidéos sélectionnées → montage pauvre"; exit 1; }
+          [ "${#SEL[@]}" -ge 2 ] || { echo "Moins de 2 vidéos sélectionnées"; exit 1; }
 
           rm -f selected_media/list.txt
           i=0
@@ -187,9 +180,11 @@ jobs:
             ffmpeg -nostdin -y -i "$SRC" \
               -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1" \
               -r 30 -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -an "$OUT"
-            printf "file '%s'\n" "$OUT" >> selected_media/list.txt
+            # IMPORTANT : écrire seulement le basename pour éviter selected_media/selected_media/...
+            printf "file '%s'\n" "$(basename "$OUT")" >> selected_media/list.txt
           done
 
+          # Le concat lit les chemins relatifs au dossier contenant list.txt
           ffmpeg -nostdin -y -f concat -safe 0 -i selected_media/list.txt -c copy selected_media/merged.mp4
           [ -s selected_media/merged.mp4 ] || { echo "concat échouée"; exit 1; }
 
@@ -282,7 +277,6 @@ jobs:
             fi
           fi
 
-          # Lien partageable
           PAYLOAD=$(printf '{"path":"%s"}' "$REMOTE_PATH")
           CODE=$(curl -sS -X POST "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings" \
             -H "Authorization: Bearer ${TOKEN}" \
