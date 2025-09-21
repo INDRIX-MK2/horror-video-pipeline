@@ -19,6 +19,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Installe d'abord les outils nécessaires
+      - name: Install deps (ffmpeg, fonts, jq)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg jq fonts-dejavu-core
+
+      # Ensuite seulement, vérifie les secrets et la présence des outils
       - name: Sanity checks (secrets + tools)
         run: |
           set -euo pipefail
@@ -29,7 +37,8 @@ jobs:
           : "${DROPBOX_ACCESS_TOKEN:?DROPBOX_ACCESS_TOKEN manquant}"
           python3 --version
           ffmpeg -version >/dev/null
-          jq --version || true
+          jq --version >/dev/null
+
 
       - name: Install deps (ffmpeg, fonts, jq)
         run: |
