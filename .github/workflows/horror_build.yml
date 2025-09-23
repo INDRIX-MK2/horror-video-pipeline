@@ -64,7 +64,8 @@ jobs:
 
       # ---------- Sous-titres WhisperX ----------
       - name: Build subtitles with WhisperX
-        run: python scripts/whisperx_subs.py --audio audio/voice.wav --output subs/subtitles.srt
+        run: python scripts/whisperx_subs.py --audio audio/voice.wav --transcript story/story.txt --out subs/subtitles.srt
+
 
       # ---------- Sélection & Merge des clips (durée = voix) ----------
       - name: Select clips and merge (match voice duration)
