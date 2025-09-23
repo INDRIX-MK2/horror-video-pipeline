@@ -1,60 +1,75 @@
 #!/usr/bin/env python3
-import os, json, pathlib, sys, urllib.request
+import os, json, pathlib, re, sys, time
+import requests
 
-# --- Config ENV
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+STORY_DIR = ROOT / "story"
+STORY_DIR.mkdir(parents=True, exist_ok=True)
+OUT = STORY_DIR / "story.txt"
+
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-SYSTEM_PROMPT  = os.environ.get("SYSTEM_PROMPT", "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire.")
-USER_PROMPT    = os.environ.get("USER_PROMPT", "Écris un script TikTok de 180 à 200 mots (65-75s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés.")
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "").strip()
+USER_PROMPT = os.environ.get("USER_PROMPT", "").strip()
 
 if not OPENAI_API_KEY:
     print("OPENAI_API_KEY manquant", file=sys.stderr)
     sys.exit(1)
 
-out_dir = pathlib.Path("story")
-out_dir.mkdir(parents=True, exist_ok=True)
-out_file = out_dir/"story.txt"
+if not SYSTEM_PROMPT or not USER_PROMPT:
+    print("Prompts manquants (SYSTEM_PROMPT/USER_PROMPT)", file=sys.stderr)
+    sys.exit(1)
 
-# --- Requête OpenAI (Chat Completions)
-payload = {
-    "model": "gpt-4o-mini",
-    "temperature": 0.9,
-    "messages": [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": USER_PROMPT}
+def remove_stage_directions(text: str) -> str:
+    t = text
+    # Supprimer lignes avec didascalies typiques
+    patterns = [
+        r'^\s*(intro|hook|scène|scene|narrateur|développement|conclusion|cta)\s*[:\-–].*$',
+        r'^\s*\(.*?\)\s*$',
+        r'^\s*\[.*?\]\s*$',
     ]
-}
-data = json.dumps(payload).encode("utf-8")
+    for pat in patterns:
+        t = re.sub(pat, "", t, flags=re.IGNORECASE | re.MULTILINE)
 
-req = urllib.request.Request(
-    "https://api.openai.com/v1/chat/completions",
-    data=data,
-    headers={
-        "Content-Type": "application/json",
+    # Enlever mentions inline type "Narrateur:" au début de phrases
+    t = re.sub(r'(?im)^(?:narrateur|voix off|locuteur)\s*:\s*', '', t)
+
+    # Nettoyages divers
+    t = t.replace('“', '"').replace('”', '"')
+    t = t.replace('«', '').replace('»', '')
+    t = re.sub(r'^\s*["\']\s*', '', t)
+    t = re.sub(r'\s*["\']\s*$', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def ask_openai(system_msg: str, user_msg: str) -> str:
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
-    },
-    method="POST",
-)
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "temperature": 1.0,
+        "messages": [
+            {"role":"system","content":system_msg},
+            {"role":"user","content":user_msg}
+        ]
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    if r.status_code != 200:
+        print(f"OpenAI HTTP {r.status_code}: {r.text[:300]}", file=sys.stderr)
+        sys.exit(1)
+    data = r.json()
+    txt = data["choices"][0]["message"]["content"]
+    return txt
 
-try:
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
-        txt = (res["choices"][0]["message"]["content"] or "").strip()
-except Exception as e:
-    print(f"Erreur OpenAI: {e}", file=sys.stderr)
-    sys.exit(1)
+raw = ask_openai(SYSTEM_PROMPT, USER_PROMPT)
+clean = remove_stage_directions(raw)
 
-# Nettoyage minimal : enlever guillemets globaux et marqueurs indésirables
-txt = txt.replace("\r", "")
-lines = [l.strip() for l in txt.split("\n") if l.strip()]
-txt = " ".join(lines)
-# Supprime mots clefs fréquents de didascalies s'ils apparaissent en tête
-banheads = ("scène", "scene", "intro", "hook", "narrateur", "cta")
-if txt.lower().split(":")[0] in banheads:
-    txt = ":".join(txt.split(":")[1:]).strip()
+# garde bornes ~180-200 mots (on n’échoue pas si >, on normalise un peu)
+words = clean.split()
+if len(words) > 230:
+    clean = " ".join(words[:230]).rstrip(" ,;:-") + "."
 
-if not txt:
-    print("Texte vide généré.", file=sys.stderr)
-    sys.exit(1)
-
-out_file.write_text(txt, encoding="utf-8")
-print(f"OK: {out_file} ({len(txt.split())} mots)")
+OUT.write_text(clean, encoding="utf-8")
+print(f"Story saved to {OUT} ({len(clean.split())} mots)")

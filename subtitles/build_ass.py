@@ -1,87 +1,76 @@
 #!/usr/bin/env python3
-import os, sys, pathlib, json, subprocess, shlex, re
+import pathlib, json, math, re, sys
 
-voice = pathlib.Path("audio/voice.mp3")
-if not voice.exists():
-    print("Audio introuvable: audio/voice.mp3", file=sys.stderr)
-    sys.exit(1)
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+HEADER = ROOT / "subtitles" / "ass_header.ass"
+STORY = ROOT / "story" / "story.txt"
+DUR_JSON = ROOT / "audio" / "duration.json"
+OUT = ROOT / "subtitles" / "captions.ass"
 
-story = pathlib.Path("story/story.txt")
-if not story.exists():
-    print("Texte introuvable: story/story.txt", file=sys.stderr)
-    sys.exit(1)
-text = story.read_text(encoding="utf-8").strip()
+if not HEADER.exists():
+    print("ass_header.ass manquant", file=sys.stderr); sys.exit(1)
+if not STORY.exists():
+    print("story.txt manquant", file=sys.stderr); sys.exit(1)
+if not DUR_JSON.exists():
+    print("duration.json manquant", file=sys.stderr); sys.exit(1)
 
-def ffprobe_duration(p: pathlib.Path) -> float:
-    cmd = ["ffprobe","-v","error","-show_entries","format=duration","-of","json",str(p)]
-    out = subprocess.check_output(cmd)
-    j = json.loads(out.decode("utf-8"))
-    return float(j["format"]["duration"])
+story = STORY.read_text(encoding="utf-8").strip()
+if not story:
+    print("story vide", file=sys.stderr); sys.exit(1)
 
-dur = max(0.1, ffprobe_duration(voice))
+dur = float(json.loads(DUR_JSON.read_text(encoding="utf-8")).get("seconds", 0.0))
+if dur <= 0.1:
+    print("durée audio invalide", file=sys.stderr); sys.exit(1)
 
-# Split en phrases -> si trop long, on retombe sur paquets de ~6 mots
-raw_sentences = re.split(r'(?<=[\.\!\?])\s+', text)
-sentences = []
-for s in raw_sentences:
-    s = s.strip()
-    if not s: 
-        continue
-    words = s.split()
-    if len(words) <= 9:
-        sentences.append(s)
-    else:
-        for i in range(0, len(words), 6):
-            sentences.append(" ".join(words[i:i+6]))
+# Split en mots
+words = re.findall(r"\S+", story)
+n = len(words)
+if n == 0:
+    print("aucun mot", file=sys.stderr); sys.exit(1)
 
-n = max(1, len(sentences))
-# Temps par ligne, en gardant 0.5s de marge finale (évite cut sec sur dernière ligne)
-per = max(dur / n, 0.8)
-# Si somme dépasse dur, on compresse légèrement
-total_needed = per * n
-if total_needed > dur:
-    per = dur / n
+# Nombre de lignes ~ dur / 3s (entre 2.5 et 3.5)
+lines_count = max(1, round(dur / 3.0))
+w_per_line = max(1, math.ceil(n / lines_count))
 
-def ts(sec: float) -> str:
-    if sec < 0: sec = 0
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = sec % 60
-    return f"{h:d}:{m:02d}:{s:05.2f}"
+# Chunk words -> lines
+chunks = []
+for i in range(0, n, w_per_line):
+    chunks.append(words[i:i+w_per_line])
 
-hdr = [
-"[Script Info]",
-"ScriptType: v4.00+",
-"PlayResX: 1080",
-"PlayResY: 1920",
-"ScaledBorderAndShadow: yes",
-"",
-"[V4+ Styles]",
-"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-"Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-"Alignment, MarginL, MarginR, MarginV, Encoding",
-"Style: TikTok,Montserrat,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,0,2,50,50,100,1",
-"",
-"[Events]",
-"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
-]
+# Helper time -> h:MM:SS.cs
+def tcode(ts: float) -> str:
+    if ts < 0: ts = 0
+    h = int(ts // 3600)
+    m = int((ts % 3600) // 60)
+    s = int(ts % 60)
+    cs = int(round((ts - int(ts)) * 100))
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
-events = []
-t = 0.0
-for s in sentences:
-    start = t
-    end = min(t + per, dur)
-    if end - start < 0.5:
-        end = min(start + 0.5, dur)
-    # Kara minimal: on garde le texte brut (pas de \k précis faute d'alignement mot-à-mot)
-    # On met un léger \N pour limiter la largeur
-    clean = s.replace("{", "").replace("}", "")
-    wrap = re.sub(r"\s{2,}", " ", clean)
-    events.append(f"Dialogue: 0,{ts(start)},{ts(end)},TikTok,,0,0,0,,{wrap}")
-    t = end
+# Écriture
+hdr = HEADER.read_text(encoding="utf-8")
+with OUT.open("w", encoding="utf-8") as f:
+    f.write(hdr)
+    f.write("\n")
+    f.write("[Events]\n")
+    f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 
-out_dir = pathlib.Path("subtitles")
-out_dir.mkdir(parents=True, exist_ok=True)
-ass = out_dir/"captions.ass"
-ass.write_text("\n".join(hdr + events) + "\n", encoding="utf-8")
-print(f"OK: {ass} ({len(events)} lignes)")
+    # Répartition des durées proportionnelle au nombre de mots
+    total_words = sum(len(c) for c in chunks)
+    t = 0.0
+    for c in chunks:
+        share = len(c) / total_words
+        seg = max(2.0, dur * share)  # au moins 2s
+        start = t
+        end = min(t + seg, dur)
+        # Karaoke tags (\k en centisecondes)
+        per_word = (end - start) / max(1, len(c))
+        centi = max(1, int(round(per_word * 100)))
+        safe_tokens = []
+        for w in c:
+            wt = w.replace("{", "(").replace("}", ")")
+            safe_tokens.append(r"{\k" + str(centi) + "}" + wt)
+        line_text = " ".join(safe_tokens)
+        f.write(f"Dialogue: 0,{tcode(start)},{tcode(end)},TikTok,,0,0,80,,{line_text}\n")
+        t = end
+
+print(f"ASS written to {OUT}")

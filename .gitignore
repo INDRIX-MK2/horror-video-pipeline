@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.story/
+audio/
+selected_media/
+final_video/*.mp4
+final_video/*.txt
+subtitles/*.ass

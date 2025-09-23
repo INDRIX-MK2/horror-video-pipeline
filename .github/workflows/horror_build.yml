@@ -1,90 +1,115 @@
-﻿name: Horror TikTok Builder (no-heredoc, voice-length)
+﻿name: Horror TikTok Builder (no-heredoc, voice-length-cut)
 
 on:
   workflow_dispatch:
   push:
     branches: ["main"]
 
+env:
+  OUT_NAME: "final_horror.mp4"
+  SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
+  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     env:
-      # ---- Secrets (définis dans Settings > Secrets and variables > Actions)
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
-      MANIFEST_URL: ${{ secrets.MANIFEST_URL }}        # facultatif (liste d'URL mp4)
+      MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
+      DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
       DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-
-      # ---- Paramètres pipeline
-      OUT_NAME: "final_horror.mp4"
-      SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
-      USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify required secrets
+      - name: Show Python & install ffmpeg
+        shell: bash
         run: |
           set -euo pipefail
-          test -n "${OPENAI_API_KEY}" || { echo "OPENAI_API_KEY manquant"; exit 1; }
-          test -n "${ELEVENLABS_API_KEY}" || { echo "ELEVENLABS_API_KEY manquant"; exit 1; }
-          test -n "${ELEVENLABS_VOICE_ID}" || { echo "ELEVENLABS_VOICE_ID manquant"; exit 1; }
-          test -n "${DROPBOX_APP_KEY}" || { echo "DROPBOX_APP_KEY manquant"; exit 1; }
-          test -n "${DROPBOX_APP_SECRET}" || { echo "DROPBOX_APP_SECRET manquant"; exit 1; }
-          test -n "${DROPBOX_REFRESH_TOKEN}" || { echo "DROPBOX_REFRESH_TOKEN manquant"; exit 1; }
+          python3 --version
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
 
-      - name: Install dependencies (ffmpeg, jq)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Generate story (OpenAI)
+      - name: Validate required secrets
+        shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/generate_story.py
-          test -s story/story.txt
+          [ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_API_KEY:-}" ] || { echo "ELEVENLABS_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_VOICE_ID:-}" ] || { echo "ELEVENLABS_VOICE_ID manquant"; exit 1; }
+          # Dropbox : soit ACCESS_TOKEN simple, soit trio APP_KEY/APP_SECRET/REFRESH_TOKEN
+          if [ -z "${DROPBOX_ACCESS_TOKEN:-}" ]; then
+            if [ -z "${DROPBOX_APP_KEY:-}" ] || [ -z "${DROPBOX_APP_SECRET:-}" ] || [ -z "${DROPBOX_REFRESH_TOKEN:-}" ]; then
+              echo "Aucun token Dropbox valide (DROPBOX_ACCESS_TOKEN ou trio APP_KEY/APP_SECRET/REFRESH_TOKEN)."
+              # On ne stoppe pas le build vidéo; on empêchera juste l'étape d'upload avec un if conditionnel
+            fi
+          fi
 
-      - name: Synthesize voice (ElevenLabs)
+      - name: Generate story (no stage directions)
+        shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/tts_elevenlabs.py
-          test -s audio/voice.mp3
+          python scripts/generate_story.py
 
-      - name: Build subtitles (ASS)
+      - name: Synthesize voice (ElevenLabs) + duration probe
+        shell: bash
         run: |
           set -euo pipefail
-          python3 subtitles/build_ass.py
-          test -s subtitles/captions.ass
+          python scripts/voice_elevenlabs.py
 
-      - name: Select clips & merge to cover voice duration
+      - name: Build background to match voice length (no black outro)
+        shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/select_and_merge.py
-          test -s selected_media/merged.mp4
+          python scripts/select_and_merge.py
 
-      - name: Render final (no black padding; cut/loop to voice length)
+      - name: Build subtitles (ASS with karaoke) from story & duration
+        shell: bash
         run: |
           set -euo pipefail
-          bash render/render_final.sh
-          test -s "final_video/${OUT_NAME}"
+          python subtitles/build_ass.py
 
-      - name: Upload to Dropbox (refresh token)
+      - name: Render final video (trim exactly to voice duration)
+        shell: bash
         run: |
           set -euo pipefail
-          bash upload/dropbox_upload.sh
-          test -s final_video/dropbox_link.txt && cat final_video/dropbox_link.txt
+          python scripts/render_final.py
 
-      - name: Upload artifacts
+      - name: Upload artifacts (video + captions)
         uses: actions/upload-artifact@v4
         with:
-          name: final_video
+          name: final_outputs
           path: |
             final_video/${{ env.OUT_NAME }}
-            final_video/dropbox_link.txt
-          if-no-files-found: error
+            subtitles/captions.ass
+
+      - name: Upload to Dropbox (if tokens available)
+        if: ${{ env.DROPBOX_ACCESS_TOKEN != '' || (env.DROPBOX_APP_KEY != '' && env.DROPBOX_APP_SECRET != '' && env.DROPBOX_REFRESH_TOKEN != '') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/dropbox_upload.py
+
+      - name: Upload Dropbox link artifact (if created)
+        if: ${{ env.DROPBOX_ACCESS_TOKEN != '' || (env.DROPBOX_APP_KEY != '' && env.DROPBOX_APP_SECRET != '' && env.DROPBOX_REFRESH_TOKEN != '') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dropbox_link
+          path: final_video/dropbox_link.txt
