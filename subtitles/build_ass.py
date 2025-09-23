@@ -1,249 +1,159 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-Génère subtitles/captions.ass (karaoké) synchronisé sur audio/voice.wav.
-
-- Lit l’histoire (story/story.txt). Si story/story_clean.txt existe, on le préfère.
-- Retire automatiquement les didascalies (intro, scène, narrateur, CTA, etc.).
-- Mesure la durée de la voix via ffprobe (pas de heredoc).
-- Répartit la durée MOT PAR MOT (tag {\kNN} en centisecondes).
-- Groupage en lignes lisibles (~4–8 mots, >=1.2s/ligne).
-- Écrit un .ass avec Style "TikTok" (défini dans ass_header.ass).
-
-Prérequis: ffmpeg/ffprobe installés. Fichiers attendus:
-- subtitles/ass_header.ass (fourni)
-- audio/voice.wav (généré par voice_elevenlabs.py)
-"""
-
-import re
-import math
-import shlex
-import subprocess
 from pathlib import Path
-from typing import List, Tuple
+import json, subprocess, shlex, math, sys
+import os
 
-ROOT = Path(__file__).resolve().parents[1]
-STORY_RAW = ROOT / "story" / "story.txt"
-STORY_CLEAN = ROOT / "story" / "story_clean.txt"
-AUDIO_FILE = ROOT / "audio" / "voice.wav"
-ASS_HEADER = ROOT / "subtitles" / "ass_header.ass"
-ASS_OUT = ROOT / "subtitles" / "captions.ass"
+# ---------- Utilitaires ----------
+def repo_root() -> Path:
+    # ce fichier est dans subtitles/, on remonte à la racine du repo
+    return Path(__file__).resolve().parents[1]
 
-# ------------------------ Utils ------------------------
+def read_text(p: Path) -> str:
+    return p.read_text(encoding="utf-8", errors="replace")
 
-def run_ffprobe_duration(path: Path) -> float:
-    """Retourne la durée (en secondes, float) du flux audio a:0 via ffprobe."""
-    if not path.is_file():
-        raise FileNotFoundError(f"Audio introuvable: {path}")
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(path)
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    s = proc.stdout.strip()
+def ass_time(t: float) -> str:
+    if t < 0: t = 0.0
+    h = int(t // 3600); t -= h * 3600
+    m = int(t // 60);   t -= m * 60
+    s = int(t)
+    cs = int(round((t - s) * 100))
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+def ffprobe_duration(path: Path) -> float:
+    # renvoie 0.0 si échec (on ne crash pas)
     try:
-        return float(s)
-    except Exception as e:
-        raise RuntimeError(f"Impossible de lire la durée via ffprobe (stdout='{s}'): {e}")
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "json", str(path)
+        ]
+        out = subprocess.check_output(cmd, text=True)
+        j = json.loads(out)
+        dur = float(j.get("format", {}).get("duration", 0.0))
+        return max(0.0, dur)
+    except Exception:
+        return 0.0
 
-def tcode(seconds: float) -> str:
-    """Format ASS h:MM:SS.cc (centisecondes)."""
-    if seconds < 0:
-        seconds = 0.0
-    cs = int(round(seconds * 100.0))
-    h = cs // (100*3600)
-    rem = cs % (100*3600)
-    m = rem // (100*60)
-    rem = rem % (100*60)
-    s = rem // 100
-    c = rem % 100
-    return f"{h:d}:{m:02d}:{s:02d}.{c:02d}"
+# ---------- Paramètres par défaut ----------
+R = repo_root()
+DEFAULT_HEADER = """[Script Info]
+; Aegisub file
+Title: TikTok Horror Subtitles
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.601
+PlayResX: 1080
+PlayResY: 1920
+Timer: 100,0000
 
-def normalize_text(txt: str) -> str:
-    """Nettoie: supprime didascalies et ponctuation parasite, condense espaces."""
-    # Supprimer guillemets isolés
-    txt = txt.replace("“", "\"").replace("”", "\"")
-    txt = txt.replace("’", "'").replace("«", "\"").replace("»", "\"")
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TikTok,Inter,20,&H00FFFFFF,&H00FFFFFF,&H00000000,&H55000000,0,0,0,0,100,100,0,0,1,3,0,2,50,50,100,1
 
-    # Retirer didascalies (intro, scène, narrateur, cta, etc.)
-    # Variantes communes + erreurs OCR (p.ex. 'Seine' au lieu de 'Scène')
-    didascalies = [
-        r"intro", r"hook", r"accroche",
-        r"sc[èe]ne", r"scene", r"seine",
-        r"narrateur", r"voix(?:\s*off)?",
-        r"cta", r"appel\s*(?:à|a)\s*l(?:’|')?action",
-        r"d[ée]veloppement", r"developpement",
-        r"conclusion", r"fin", r"gros\s*plan", r"plan\s*(?:large|rapproch[ée]?)",
-    ]
-    pat = r"(?i)\b(?:" + "|".join(didascalies) + r")\b[:;,.\-–—]*"
-    txt = re.sub(pat, " ", txt)
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
 
-    # Retirer blocs entre parenthèses/crochets/accolades (indications de scène)
-    txt = re.sub(r"[\(\[\{][^\)\]\}]*[\)\]\}]", " ", txt)
+def load_header(explicit: Path | None) -> str:
+    # priorité à un header fourni, sinon on tente subtitles/ass_header.ass,
+    # sinon fallback embarqué
+    if explicit and explicit.is_file() and explicit.stat().st_size > 0:
+        return read_text(explicit)
+    candidate = R / "subtitles" / "ass_header.ass"
+    if candidate.is_file() and candidate.stat().st_size > 0:
+        return read_text(candidate)
+    return DEFAULT_HEADER
 
-    # Compresser espaces
-    txt = re.sub(r"\s+", " ", txt).strip()
-    return txt
-
-def tokenize(txt: str) -> List[str]:
+def split_into_lines(words, total_duration):
     """
-    Tokenise en mots + ponctuation (on garde .,;:!?… séparés pour un timing léger).
+    On découpe en lignes lisibles avec durées régulières.
+    Règle simple :
+      - viser ~2.0 s par ligne (min 1.5 / max 3.5)
+      - 1 à 8 mots par ligne
     """
-    tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+'?[A-Za-zÀ-ÖØ-öø-ÿ0-9]+|[A-Za-zÀ-ÖØ-öø-ÿ0-9]+|[.,;:!?…]", txt)
-    return tokens
-
-def distribute_centiseconds(total_cs: int, n: int, punct_idx: List[int]) -> List[int]:
-    """
-    Répartit total_cs sur n tokens. Ponctuation reçoit peu (6cs), mots reçoivent le reste.
-    Ajuste la somme pour coller exactement à total_cs.
-    """
-    if n <= 0 or total_cs <= 0:
-        return []
-
-    base_punct = 6  # 0.06 s par ponctuation
-    cs = [0]*n
-    n_punct = len(punct_idx)
-    total_punct = base_punct * n_punct
-    total_words = max(0, total_cs - total_punct)
-    n_words = n - n_punct
-    if n_words <= 0:
-        # que ponctuation: tout en ponctuation
-        for i in punct_idx:
-            cs[i] = base_punct
-        # ajustement
-        diff = total_cs - sum(cs)
-        i = 0
-        while diff != 0 and i < n:
-            step = 1 if diff > 0 else -1
-            cs[i] += step
-            diff -= step
-            i = (i + 1) % n
-        return cs
-
-    per_word = max(8, int(round(total_words / n_words)))  # >= 0.08s par mot
-    for i in range(n):
-        if i in punct_idx:
-            cs[i] = base_punct
-        else:
-            cs[i] = per_word
-
-    # Ajustement fin pour respecter exactement total_cs
-    diff = total_cs - sum(cs)
-    i = 0
-    while diff != 0 and n > 0:
-        if i not in punct_idx:  # ajuste de préférence les mots
-            step = 1 if diff > 0 else -1
-            # garde une borne basse raisonnable
-            if cs[i] + step >= 6:
-                cs[i] += step
-                diff -= step
-        i = (i + 1) % n
-    return cs
-
-def group_lines(tokens: List[str], cs: List[int]) -> List[Tuple[List[str], List[int]]]:
-    """
-    Regroupe en lignes lisibles (~4–8 tokens), et >= 1.2s par ligne si possible.
-    """
+    n = max(1, len(words))
+    if total_duration <= 0:
+        # fallback si on ne connaît pas la durée audio : 70 s par défaut
+        total_duration = 70.0
+    target = max(1.5, min(3.0, total_duration / max(1, math.ceil(n / 5))))
     lines = []
-    buf_toks, buf_cs = [], []
-    acc = 0
-    # bornes
-    min_line_cs = 120  # 1.2s
-    max_tokens = 8
-    soft_tokens = 6
-
-    for i, (w, k) in enumerate(zip(tokens, cs)):
-        buf_toks.append(w)
-        buf_cs.append(k)
-        acc += k
-
-        end_of_sentence = (w in [".", "!", "?", "…"])
-        enough_tokens = (len(buf_toks) >= soft_tokens)
-        hard_cap = (len(buf_toks) >= max_tokens)
-        enough_time = (acc >= min_line_cs)
-
-        if end_of_sentence and enough_time:
-            lines.append((buf_toks, buf_cs))
-            buf_toks, buf_cs, acc = [], [], 0
-        elif hard_cap and enough_time:
-            lines.append((buf_toks, buf_cs))
-            buf_toks, buf_cs, acc = [], [], 0
-
-    if buf_toks:
-        lines.append((buf_toks, buf_cs))
+    buf = []
+    acc = 0.0
+    i = 0
+    while i < n:
+        buf.append(words[i])
+        acc += target / max(1, 5)  # approx ~5 mots par ligne
+        # on ferme la ligne si >1.5 s et fin de phrase ou on dépasse 3.5 s
+        end_sentence = words[i].endswith(('.', '!', '?', '…'))
+        if (acc >= 1.5 and end_sentence) or acc >= 3.5 or len(buf) >= 8:
+            lines.append((" ".join(buf).strip(), acc))
+            buf, acc = [], 0.0
+        i += 1
+    if buf:
+        lines.append((" ".join(buf).strip(), max(1.5, min(3.5, acc or 2.0))))
+    # renormalise pour coller exactement à total_duration
+    total = sum(d for _, d in lines) or 1.0
+    scale = total_duration / total
+    lines = [(txt, d * scale) for (txt, d) in lines]
     return lines
 
-def build_kara_text(words: List[str], cs: List[int]) -> str:
+def make_karaoke_line(text: str, start: float, dur: float):
     """
-    Construit le texte karaoké: {\kNN}mot ...
-    Attention: pour écrire des accolades dans f-string => double accolades.
+    Répartition équitable de \k par mot (centisecondes).
     """
-    parts = []
-    for w, k in zip(words, cs):
-        parts.append(f"{{\\k{k}}}{w} ")
-    return "".join(parts).rstrip()
-
-# ------------------------ Main ------------------------
+    words = [w for w in text.split() if w.strip()]
+    if not words:
+        return start, start + dur, text
+    per = int(round((dur * 100) / max(1, len(words))))  # cs par mot
+    kara = "".join([f"{{\\k{per}}}{w} " for w in words]).rstrip()
+    return start, start + dur, kara
 
 def main():
-    # 1) Lire l’histoire
-    src = STORY_CLEAN if STORY_CLEAN.is_file() else STORY_RAW
-    if not src.is_file():
-        raise FileNotFoundError(f"Histoire introuvable: {src}")
-    text = src.read_text(encoding="utf-8").strip()
+    # arguments simples via variables d'env (évite argparse pour rester court)
+    header_arg = os.environ.get("ASS_HEADER", "").strip()
+    story_path = os.environ.get("STORY_PATH", "story/story.txt").strip()
+    audio_path = os.environ.get("AUDIO_PATH", "audio/voice.wav").strip()
+    out_path = os.environ.get("ASS_OUT", "subtitles/captions.ass").strip()
 
-    # 2) Nettoyage (anti-didascalies)
-    text = normalize_text(text)
+    header = load_header(Path(header_arg) if header_arg else None)
 
-    # Sécurité : si vide, on évite de générer un .ass vide
-    if not text:
-        raise RuntimeError("Le texte nettoyé est vide après suppression des didascalies.")
+    story_file = (R / story_path).resolve()
+    audio_file = (R / audio_path).resolve()
+    out_file = (R / out_path).resolve()
+    out_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # 3) Durée audio
-    duration = run_ffprobe_duration(AUDIO_FILE)  # secondes float
-    total_cs = max(1, int(round(duration * 100.0)))
+    if not story_file.is_file():
+        print(f"[build_ass] story manquant: {story_file}", file=sys.stderr)
+        sys.exit(1)
 
-    # 4) Tokenisation + attribution des centisecondes
-    tokens = tokenize(text)
-    if not tokens:
-        raise RuntimeError("Aucun token après tokenisation.")
+    text = read_text(story_file).strip()
+    # enlève toute didascalie type "Intro:" "Scène:" etc.
+    # (protection au cas où)
+    lines_raw = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        # supprime un éventuel label "Intro:" etc.
+        ln = ln.split(":", 1)[-1].strip() if ":" in ln[:12] else ln
+        lines_raw.append(ln)
+    text = " ".join(lines_raw)
+    words = text.split()
 
-    punct_idx = [i for i, t in enumerate(tokens) if t in [".", ",", ";", ":", "!", "?", "…"]]
-    cs = distribute_centiseconds(total_cs, len(tokens), punct_idx)
+    dur = ffprobe_duration(audio_file)
+    timed = split_into_lines(words, dur)
 
-    # 5) Groupage en lignes
-    grouped = group_lines(tokens, cs)
+    # construit le document ASS
+    events = []
+    t = 0.0
+    for txt, d in timed:
+        s, e, kara = make_karaoke_line(txt, t, d)
+        events.append(f"Dialogue: 0,{ass_time(s)},{ass_time(e)},TikTok,,0,0,0,,{kara}")
+        t = e
 
-    # 6) Écriture du .ass
-    ASS_OUT.parent.mkdir(parents=True, exist_ok=True)
-    if not ASS_HEADER.is_file():
-        raise FileNotFoundError(f"Header ASS manquant: {ASS_HEADER}")
-
-    header = ASS_HEADER.read_text(encoding="utf-8")
-    with ASS_OUT.open("w", encoding="utf-8", newline="\n") as f:
-        f.write(header.rstrip("\n") + "\n")
-        t = 0  # en centisecondes
-        for words, klist in grouped:
-            dur_line = sum(klist)
-            start = t / 100.0
-            end = (t + dur_line) / 100.0
-            kara = build_kara_text(words, klist)
-            f.write(f"Dialogue: 0,{tcode(start)},{tcode(end)},TikTok,,0,0,0,,{kara}\n")
-            t += dur_line
-
-        # Ajuste la dernière ligne si sous/over vs. durée voix (petit delta)
-        final_end = t / 100.0
-        delta = duration - final_end
-        if abs(delta) >= 0.02:
-            # Ajouter une micro-pause en fin OU rogner la dernière ligne légèrement
-            # (option sûre: on laisse tel quel, le renderer -shortest coupera proprement).
-            pass
-
-    print(f"[OK] Sous-titres écrits : {ASS_OUT} (durée voix ~ {duration:.2f}s)")
+    out_file.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+    print(f"[build_ass] écrit: {out_file} (durée audio détectée: {dur:.2f}s)")
 
 if __name__ == "__main__":
     main()
