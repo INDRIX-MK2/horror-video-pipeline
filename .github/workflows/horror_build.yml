@@ -1,19 +1,25 @@
-﻿name: Horror TikTok Builder (no-heredoc, voice-length)
+﻿name: Horror TikTok Builder (no-heredoc, WhisperX)
 
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
+
+permissions:
+  contents: read
 
 env:
   OUT_NAME: "final_horror.mp4"
-  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+  # Prompts (fr)
   SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
+  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
+      # Secrets requis (refresh token Dropbox recommandé)
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
@@ -25,106 +31,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Create folders
+        run: |
+          mkdir -p story audio subs selected_media final_video
+
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install ffmpeg and Python deps
+      - name: Install system dependencies
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies (Torch CPU, WhisperX, etc.)
+        run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -V
-          ffmpeg -version | head -n 1
+          pip install torch==2.3.1+cpu torchaudio==2.3.1+cpu --index-url https://download.pytorch.org/whl/cpu
+          pip install whisperx==3.1.1 requests rich numpy
 
-      - name: Create folders
-        run: |
-          set -euo pipefail
-          mkdir -p story audio selected_media subtitles final_video
-
+      # ---------- Génération du script ----------
       - name: Generate story (OpenAI)
-        run: |
-          set -euo pipefail
-          [ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY missing"; exit 1; }
-          python3 scripts/generate_story.py \
-            --system "$SYSTEM_PROMPT" \
-            --user "$USER_PROMPT" \
-            --out-path story/story.txt
-
-      - name: TTS voice (ElevenLabs)
-        run: |
-          set -euo pipefail
-          [ -n "${ELEVENLABS_API_KEY:-}" ] || { echo "ELEVENLABS_API_KEY missing"; exit 1; }
-          [ -n "${ELEVENLABS_VOICE_ID:-}" ] || { echo "ELEVENLABS_VOICE_ID missing"; exit 1; }
-          python3 scripts/voice_elevenlabs.py \
-            --text-file story/story.txt \
-            --voice-id "${ELEVENLABS_VOICE_ID}" \
-            --out audio/voice.wav
-
-      - name: Select & merge clips by audio duration (no fixed count)
-        run: |
-          set -euo pipefail
-          python3 scripts/select_and_merge.py \
-            --manifest-file manifests/horreur.txt \
-            --audio audio/voice.wav \
-            --workdir selected_media \
-            --out selected_media/merged.mp4 \
-            --size 1080x1920 \
-            --fps 30
-
-      - name: Build ASS subtitles (karaoke, header fallback)
-        run: |
-          set -euo pipefail
-          python3 subtitles/build_ass.py
+        run: python scripts/generate_story.py
         env:
-          ASS_HEADER: subtitles/ass_header.ass
-          STORY_PATH: story/story.txt
-          AUDIO_PATH: audio/voice.wav
-          ASS_OUT: subtitles/captions.ass
+          SYSTEM_PROMPT: ${{ env.SYSTEM_PROMPT }}
+          USER_PROMPT: ${{ env.USER_PROMPT }}
 
-      - name: Render final video (trim/extend to audio length only)
-        run: |
-          set -euo pipefail
-          python3 scripts/render_final.py \
-            --video selected_media/merged.mp4 \
-            --audio audio/voice.wav \
-            --subs subtitles/captions.ass \
-            --out "final_video/${OUT_NAME}"
+      # ---------- Voix ElevenLabs ----------
+      - name: Synthesize voice (ElevenLabs)
+        run: python scripts/voice_elevenlabs.py --input story/story.txt --output audio/voice.wav
 
-      - name: Upload artifact (final video)
+      # ---------- Sous-titres WhisperX ----------
+      - name: Build subtitles with WhisperX
+        run: python scripts/whisperx_subs.py --audio audio/voice.wav --output subs/subtitles.srt
+
+      # ---------- Sélection & Merge des clips (durée = voix) ----------
+      - name: Select clips and merge (match voice duration)
+        run: python scripts/select_and_merge.py --manifest manifests/horreur.txt --audio audio/voice.wav --output selected_media/merged.mp4
+
+      # ---------- Rendu final (overlay SRT, rognage à la durée audio) ----------
+      - name: Render final video
+        run: python scripts/render_final.py --video selected_media/merged.mp4 --audio audio/voice.wav --subs subs/subtitles.srt --output final_video/${{ env.OUT_NAME }}
+
+      # ---------- Upload Dropbox (Refresh Token) ----------
+      - name: Upload to Dropbox
+        run: python scripts/dropbox_upload.py --file final_video/${{ env.OUT_NAME }} --out final_video/dropbox_link.txt
+
+      # ---------- Artifacts ----------
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: final_video
-          path: final_video/
-
-      - name: Upload artifacts (story/audio/subs/manifest)
-        uses: actions/upload-artifact@v4
-        with:
-          name: build_assets
           path: |
-            story/
-            audio/
-            subtitles/
-            selected_media/manifest.txt
-            manifests/horreur.txt
-
-      - name: Dropbox upload (refresh token)
-        run: |
-          set -euo pipefail
-          [ -n "${DROPBOX_APP_KEY:-}" ] || { echo "DROPBOX_APP_KEY missing"; exit 1; }
-          [ -n "${DROPBOX_APP_SECRET:-}" ] || { echo "DROPBOX_APP_SECRET missing"; exit 1; }
-          [ -n "${DROPBOX_REFRESH_TOKEN:-}" ] || { echo "DROPBOX_REFRESH_TOKEN missing"; exit 1; }
-          python3 scripts/dropbox_upload.py \
-            --file "final_video/${OUT_NAME}" \
-            --remote-folder "/horror" \
-            --out-link-file "final_video/dropbox_link.txt"
-
-      - name: Upload artifact (Dropbox link)
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: dropbox_link
-          path: final_video/dropbox_link.txt
+            final_video/${{ env.OUT_NAME }}
+            final_video/dropbox_link.txt
