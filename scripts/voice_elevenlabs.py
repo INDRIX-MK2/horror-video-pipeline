@@ -2,293 +2,355 @@
 # -*- coding: utf-8 -*-
 
 """
-Synthèse vocale ElevenLabs avec support dialogue V1/V2 (ou fallback 1 voix).
+voice_elevenlabs.py
+-------------------
+Génère une narration à partir d'un transcript texte via ElevenLabs.
+- Supporte 1 ou 2 voix (V1/V2).
+- Sorties :
+    audio/voice.wav
+    audio/dialogue_cues.json  (liste [{start, end, text, speaker}])
 
-Entrées:
-  - --input story/story.txt   (par défaut)
-  - --out   audio/voice.wav   (par défaut)
-  - --cues  audio/dialogue_cues.json
+ENV requis :
+  ELEVENLABS_API_KEY
+  (au choix)
+    ELEVENLABS_VOICE_ID                 # mode 1 voix
+  ou ELEVENLABS_VOICE_ID_V1 + ELEVENLABS_VOICE_ID_V2  # mode 2 voix
 
-ENV requis:
-  - ELEVENLABS_API_KEY (obligatoire)
-  - ELEVENLABS_VOICE_ID            (fallback 1 voix)
-  - ELEVENLABS_VOICE_ID_V1 (optionnel, pour V1)
-  - ELEVENLABS_VOICE_ID_V2 (optionnel, pour V2)
+ENV optionnels :
+  ELEVENLABS_MODEL_ID   (defaut: eleven_multilingual_v2)
+  ELEVEN_STABILITY      (float 0..1)
+  ELEVEN_SIMILARITY     (float 0..1)
+  ELEVEN_STYLE          (float 0..1)
+  ELEVEN_SPEAKER_BOOST  ("true"/"false")
 
-Sorties:
-  - audio/voice.wav
-  - audio/dialogue_cues.json  (liste [{speaker, text, start, end}])
+Dépendances binaires : ffmpeg/ffprobe dans le PATH.
 """
 
 import argparse
-import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
-import wave
 from pathlib import Path
 
-import requests
+API_BASE = "https://api.elevenlabs.io/v1"
+DEFAULT_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 
+# ---------- Utils ----------
 
-MODEL_ID = "eleven_multilingual_v2"
-VOICE_SETTINGS = {
-    "stability": 0.8,
-    "similarity_boost": 0.85,
-    "style": 0.2,
-    "use_speaker_boost": True
-}
+def fail(msg: str, code: int = 1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
 
-# -------- Utils --------
+def check_ffmpeg():
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(["ffprobe", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except Exception:
+        fail("ffmpeg/ffprobe introuvables dans le PATH. Installe-les ou ajoute-les au PATH.")
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8").strip()
+def run_ffmpeg_to_wav(input_bytes: bytes, dst_wav: Path, sr: int = 48000, ac: int = 1):
+    """Convertit des données audio (mp3/mpeg) en WAV PCM 16-bit mono via ffmpeg."""
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-i", "pipe:0",
+        "-ar", str(sr), "-ac", str(ac),
+        "-f", "wav", str(dst_wav)
+    ]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p.stdin.write(input_bytes)
+    p.stdin.close()
+    rc = p.wait()
+    if rc != 0 or not dst_wav.exists() or dst_wav.stat().st_size == 0:
+        fail("Échec conversion ffmpeg vers WAV.")
 
-def ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
+def wav_duration_seconds(wav_path: Path) -> float:
+    """Retourne la durée d'un WAV (via ffprobe)."""
+    try:
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(wav_path)
+        ], stderr=subprocess.DEVNULL, text=True).strip()
+        return float(out)
+    except Exception:
+        return 0.0
 
-def sanitize_for_ass(text: str) -> str:
-    # On garde propre pour éventuels usages ultérieurs
-    return text.replace("\r", "").strip()
+def clean_line_basic(line: str) -> str:
+    """Nettoyage léger : supprime espaces chelous, guillemets externes."""
+    s = line.strip()
+    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == '“') or (s[0] == s[-1] == '”')):
+        s = s[1:-1].strip()
+    return s
 
-def strip_directions(line: str) -> str:
-    # supprime [entre crochets] et (entre parenthèses)
-    line = re.sub(r"\[[^\]]*\]", "", line)
-    line = re.sub(r"\([^\)]*\)", "", line)
-    # supprime “Intro:”, “Scène:”, etc. au début de ligne
-    line = re.sub(r"^\s*(intro|scène|scene|narrateur|cta)\s*:\s*", "", line, flags=re.I)
-    return line.strip()
+# ---------- Parsing transcript ----------
 
-def split_long_text(txt: str, max_len: int = 250) -> list[str]:
-    """Découpe prudemment en phrases <= max_len (pour éviter limites API)."""
-    txt = " ".join(txt.split())
-    if len(txt) <= max_len:
-        return [txt]
-    # Essai par ponctuation
-    parts = re.split(r"(?<=[\.\?\!])\s+", txt)
-    out, buf = [], ""
-    for p in parts:
-        if not buf:
-            buf = p
-        elif len(buf) + 1 + len(p) <= max_len:
-            buf += " " + p
-        else:
-            out.append(buf)
-            buf = p
-    if buf:
-        out.append(buf)
-    # Si malgré tout trop long, coupe en durs
-    final = []
-    for seg in out:
-        if len(seg) <= max_len:
-            final.append(seg)
-        else:
-            s = seg
-            while len(s) > max_len:
-                final.append(s[:max_len])
-                s = s[max_len:]
-            if s:
-                final.append(s)
-    return [x.strip() for x in final if x.strip()]
+VOICE_TAG_RE = re.compile(r"^\s*(V1|V2|Voix\s*1|Voix\s*2)\s*:\s*(.+)$", re.IGNORECASE)
 
-def wav_duration_from_bytes(wav_bytes: bytes) -> float:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
-        frames = w.getnframes()
-        rate = w.getframerate()
-        return frames / float(rate)
+DIDASCALIE_PREFIXES = (
+    "scène", "scene", "intro", "hook", "narrateur", "cta",
+    "développement", "developpement", "voix", "voice"
+)
 
-def combine_wavs_same_params(in_files: list[Path], out_file: Path) -> None:
-    """Concatène des WAV avec mêmes paramètres (nchannels, sampwidth, framerate)."""
-    if not in_files:
-        raise RuntimeError("Aucun morceau audio à concaténer.")
-    # Paramètres du premier
-    with wave.open(str(in_files[0]), "rb") as w0:
-        nch, sw, fr = w0.getnchannels(), w0.getsampwidth(), w0.getframerate()
-    # Ecriture
-    with wave.open(str(out_file), "wb") as wout:
-        wout.setnchannels(nch)
-        wout.setsampwidth(sw)
-        wout.setframerate(fr)
-        for f in in_files:
-            with wave.open(str(f), "rb") as win:
-                if (win.getnchannels(), win.getsampwidth(), win.getframerate()) != (nch, sw, fr):
-                    raise RuntimeError(f"Paramètres WAV incompatibles: {f.name}")
-                wout.writeframes(win.readframes(win.getnframes()))
+SENT_SPLIT_RE = re.compile(r"(?<=[\.\!\?\u2026])\s+")
 
-def tts_elevenlabs(text: str, voice_id: str, api_key: str) -> bytes:
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-    headers = {
-        "xi-api-key": api_key,
-        "Accept": "audio/wav",
-        "Content-Type": "application/json"
-    }
+def parse_transcript(path: Path) -> dict:
+    """
+    Retourne un dict :
+      {
+        "mode": "dual"|"single",
+        "segments": [ { "speaker": "V1"|"V2", "text": "..." }, ... ]
+      }
+    Règles :
+      - Si des lignes explicitent V1:/V2: => mode dual, segments par ligne.
+      - Sinon => mode single, on split en phrases (pour des cues plus fines).
+      - On ignore les lignes *entièrement* didascaliques si pas de V1/V2.
+    """
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+    lines = [clean_line_basic(l) for l in raw.splitlines() if clean_line_basic(l)]
+
+    # Détecte balises V1/V2
+    dual_segments = []
+    dual_detected = False
+    for ln in lines:
+        m = VOICE_TAG_RE.match(ln)
+        if m:
+            dual_detected = True
+            tag = m.group(1).upper().replace("VOIX", "V").replace(" ", "")
+            speaker = "V1" if "1" in tag else "V2"
+            text = m.group(2).strip()
+            if text:
+                dual_segments.append({"speaker": speaker, "text": text})
+
+    if dual_detected and dual_segments:
+        return {"mode": "dual", "segments": dual_segments}
+
+    # Sinon: mode single (pas de V1/V2 explicite)
+    kept = []
+    for ln in lines:
+        lower = ln.lower()
+        if any(lower.startswith(prefix + ":") for prefix in DIDASCALIE_PREFIXES):
+            continue
+        kept.append(ln)
+
+    text_single = " ".join(kept).strip()
+    if not text_single:
+        text_single = " ".join(lines).strip()
+
+    sentences = [s.strip() for s in SENT_SPLIT_RE.split(text_single) if s.strip()]
+    segments = [{"speaker": "V1", "text": s} for s in sentences] if sentences else [{"speaker": "V1", "text": text_single}]
+    return {"mode": "single", "segments": segments}
+
+# ---------- ElevenLabs TTS ----------
+
+def tts_elevenlabs(api_key: str, voice_id: str, text: str) -> bytes:
+    """Appel ElevenLabs TTS -> renvoie audio MP3 (bytes)."""
+    import urllib.request
+    import urllib.error
+
+    url = f"{API_BASE}/text-to-speech/{voice_id}"
     payload = {
         "text": text,
-        "model_id": MODEL_ID,
-        "voice_settings": VOICE_SETTINGS
+        "model_id": DEFAULT_MODEL,
+        "output_format": "mp3_44100_128",
+        "voice_settings": {}
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=120)
-    if r.status_code != 200:
+
+    def parse_float(name, default=None):
+        v = os.getenv(name)
         try:
-            info = r.json()
+            return float(v) if v is not None else default
         except Exception:
-            info = r.text
-        raise RuntimeError(f"TTS HTTP {r.status_code}: {info}")
-    return r.content
+            return default
 
-def parse_dialogue(raw: str) -> list[tuple[str, str]]:
-    """
-    Renvoie une liste [(speaker, text), ...]
-    Détecte V1/V2 (tolère 'Voix 1:' / 'Voix 2:' / 'V1 -' / 'V2 —', etc.)
-    Si rien trouvé -> [('V1', full_text)]
-    """
-    lines = [l.strip() for l in raw.splitlines()]
-    segs: list[tuple[str, str]] = []
-    speaker_re = re.compile(r"^(v\s*1|voix\s*1|v1)\s*[:\-—]\s*(.+)$", re.I)
-    speaker_re2 = re.compile(r"^(v\s*2|voix\s*2|v2)\s*[:\-—]\s*(.+)$", re.I)
+    stability = parse_float("ELEVEN_STABILITY")
+    similarity = parse_float("ELEVEN_SIMILARITY")
+    style = parse_float("ELEVEN_STYLE")
+    boost = os.getenv("ELEVEN_SPEAKER_BOOST")
 
-    for line in lines:
-        if not line:
-            continue
-        line = strip_directions(line)
-        if not line:
-            continue
+    if stability is not None:
+        payload["voice_settings"]["stability"] = stability
+    if similarity is not None:
+        payload["voice_settings"]["similarity_boost"] = similarity
+    if style is not None:
+        payload["voice_settings"]["style"] = style
+    if boost is not None:
+        payload["voice_settings"]["use_speaker_boost"] = (boost.lower() in ("1","true","yes","on"))
 
-        m1 = speaker_re.match(line)
-        m2 = speaker_re2.match(line)
-        if m1:
-            segs.append(("V1", m1.group(2).strip()))
-        elif m2:
-            segs.append(("V2", m2.group(2).strip()))
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+            "xi-api-key": api_key
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", errors="ignore")
+        fail(f"ElevenLabs HTTPError {e.code}: {msg}")
+    except Exception as e:
+        fail(f"ElevenLabs échec TTS: {e}")
+    return b""
+
+# ---------- Helpers ----------
+
+def chunk_text(text: str, max_len: int = 1200):
+    """Coupe proprement par phrases pour rester < max_len."""
+    parts = []
+    buf = ""
+    sentences = [s.strip() for s in SENT_SPLIT_RE.split(text) if s.strip()]
+    items = sentences if sentences else [text]
+    for s in items:
+        if len(buf) + 1 + len(s) <= max_len:
+            buf = (buf + " " + s).strip() if buf else s
         else:
-            # pas de label V1/V2 explicite pour cette ligne
-            segs.append(("", line))
-
-    # Si au moins un vrai label trouvé, on va “propager” le dernier speaker
-    has_any_label = any(s in ("V1", "V2") for s, _ in segs)
-    if has_any_label:
-        current = "V1"
-        normalized = []
-        for s, t in segs:
-            if s in ("V1", "V2"):
-                current = s
-                normalized.append((current, t))
+            if buf:
+                parts.append(buf)
+            if len(s) <= max_len:
+                buf = s
             else:
-                normalized.append((current, t))
-        segs = normalized
-    else:
-        # Tout en un bloc V1 si aucun label
-        joined = " ".join([t for _, t in segs]).strip()
-        segs = [("V1", joined)] if joined else []
+                while len(s) > max_len:
+                    parts.append(s[:max_len])
+                    s = s[max_len:]
+                buf = s
+    if buf:
+        parts.append(buf)
+    return parts
 
-    # Nettoyage final + suppressions de lignes vides
-    cleaned = []
-    for s, t in segs:
-        t = sanitize_for_ass(t)
-        if t:
-            cleaned.append((s, t))
-    return cleaned
+def concat_wavs(wav_list, dst_path: Path):
+    """Concatène une liste de WAV (même format) en un seul WAV via ffmpeg concat demuxer."""
+    if len(wav_list) == 1:
+        shutil.copyfile(wav_list[0], dst_path)
+        return
 
-# -------- Main --------
+    tmp_dir = dst_path.parent
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    list_file = tmp_dir / ("concat_%d.txt" % int(time.time()*1000))
+    with list_file.open("w", encoding="utf-8") as f:
+        for p in wav_list:
+            abs_path = str(Path(p).resolve())
+            # Echappement POSIX pour single-quoted : ' -> '\'' 
+            escaped = abs_path.replace("'", "'\\''")
+            f.write("file '" + escaped + "'\n")
+
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-c", "copy", str(dst_path)
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        list_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+# ---------- Build pipeline ----------
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="story/story.txt", help="Chemin du script .txt")
-    ap.add_argument("--out", default="audio/voice.wav", help="Sortie WAV")
-    ap.add_argument("--cues", default="audio/dialogue_cues.json", help="Cues JSON")
+    ap = argparse.ArgumentParser(description="Génère une narration ElevenLabs + cues JSON")
+    ap.add_argument("--transcript", required=True, help="Chemin du transcript texte (UTF-8)")
+    ap.add_argument("--out", default="audio/voice.wav", help="Chemin du WAV final (défaut: audio/voice.wav)")
+    ap.add_argument("--cues", default="audio/dialogue_cues.json", help="Chemin des cues JSON (défaut: audio/dialogue_cues.json)")
     args = ap.parse_args()
 
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
-        print("ELEVENLABS_API_KEY manquant", file=sys.stderr)
-        sys.exit(1)
+        fail("ELEVENLABS_API_KEY manquant dans l'environnement.")
 
-    voice_fallback = os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
-    voice_v1 = os.environ.get("ELEVENLABS_VOICE_ID_V1", "").strip() or voice_fallback
-    voice_v2 = os.environ.get("ELEVENLABS_VOICE_ID_V2", "").strip() or voice_fallback
-    if not voice_v1:
-        print("Aucune voix configurée (ELEVENLABS_VOICE_ID ou *_V1/V2).", file=sys.stderr)
-        sys.exit(1)
+    voice_single = os.getenv("ELEVENLABS_VOICE_ID")
+    voice_v1 = os.getenv("ELEVENLABS_VOICE_ID_V1")
+    voice_v2 = os.getenv("ELEVENLABS_VOICE_ID_V2")
 
-    in_path = Path(args.input)
+    if voice_v1 and voice_v2:
+        mode_voices = "dual"
+    elif voice_single:
+        mode_voices = "single"
+    else:
+        fail("Aucune voix configurée. Renseigne ELEVENLABS_VOICE_ID (1 voix) ou ELEVENLABS_VOICE_ID_V1 + ELEVENLABS_VOICE_ID_V2 (2 voix).")
+
+    transcript_path = Path(args.transcript)
+    if not transcript_path.exists() or transcript_path.stat().st_size == 0:
+        fail(f"Transcript introuvable ou vide: {transcript_path}")
+
     out_wav = Path(args.out)
     cues_json = Path(args.cues)
-    chunks_dir = out_wav.parent / "chunks"
-    ensure_dir(out_wav.parent)
-    ensure_dir(chunks_dir)
-    ensure_dir(cues_json.parent)
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    cues_json.parent.mkdir(parents=True, exist_ok=True)
 
-    if not in_path.exists():
-        print(f"Script introuvable: {in_path}", file=sys.stderr)
-        sys.exit(1)
+    check_ffmpeg()
 
-    raw = read_text(in_path)
-    segments = parse_dialogue(raw)
-    if not segments:
-        print("Script vide après parsing.", file=sys.stderr)
-        sys.exit(1)
+    parsed = parse_transcript(transcript_path)
+    segments = parsed["segments"]
 
-    # Synthèse morceau par morceau
-    cue_list = []
-    chunk_files: list[Path] = []
-    t_cursor = 0.0
-    idx = 0
+    def voice_for(speaker: str) -> str:
+        sp = (speaker or "V1").upper()
+        if mode_voices == "dual":
+            return voice_v1 if sp == "V1" else voice_v2
+        return voice_single
 
-    for speaker, text in segments:
-        # découpe prudente (si réplique très longue)
-        parts = split_long_text(text, max_len=250)
-        local_duration = 0.0
-        for j, part in enumerate(parts):
-            idx += 1
-            voice_id = voice_v1 if speaker == "V1" else voice_v2
-            try:
-                audio_bytes = tts_elevenlabs(part, voice_id, api_key)
-            except Exception as e:
-                print(f"[TTS] Erreur sur segment {idx}: {e}", file=sys.stderr)
-                sys.exit(1)
+    tmpdir = Path(tempfile.mkdtemp(prefix="elvtts_"))
+    tmp_wavs = []
+    total_duration = 0.0
 
-            # durée
-            dur = wav_duration_from_bytes(audio_bytes)
-            local_duration += dur
-
-            # écrit le chunk
-            cf = chunks_dir / f"chunk_{idx:04d}.wav"
-            with open(cf, "wb") as f:
-                f.write(audio_bytes)
-            chunk_files.append(cf)
-
-            # petite pause pour respecter quotas si besoin
-            time.sleep(0.05)
-
-        # crée un cue pour TOUTE la réplique (somme des parts)
-        cue_list.append({
-            "speaker": speaker,
-            "text": text,
-            "start": round(t_cursor, 3),
-            "end": round(t_cursor + local_duration, 3)
-        })
-        t_cursor += local_duration
-
-    # concatène en un seul WAV
     try:
-        combine_wavs_same_params(chunk_files, out_wav)
-    except Exception as e:
-        print(f"Concat WAV échouée: {e}", file=sys.stderr)
-        sys.exit(1)
+        for idx, seg in enumerate(segments, 1):
+            speaker = seg.get("speaker") or "V1"
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
 
-    # écrit les cues
-    cues_json.write_text(json.dumps(cue_list, ensure_ascii=False, indent=2), encoding="utf-8")
+            text_chunks = chunk_text(text, max_len=1200)
+            seg_wavs = []
+            for ci, chunk in enumerate(text_chunks, 1):
+                mp3_bytes = tts_elevenlabs(api_key, voice_for(speaker), chunk)
+                seg_wav = tmpdir / f"seg_{idx:03d}_{ci:02d}.wav"
+                run_ffmpeg_to_wav(mp3_bytes, seg_wav, sr=48000, ac=1)
+                seg_wavs.append(seg_wav)
 
-    total_dur = 0.0
-    if cue_list:
-        total_dur = cue_list[-1]["end"]
+            if len(seg_wavs) == 1:
+                final_seg_wav = seg_wavs[0]
+            else:
+                final_seg_wav = tmpdir / f"seg_{idx:03d}_full.wav"
+                concat_wavs(seg_wavs, final_seg_wav)
 
-    print(f"[voice_elevenlabs] {len(cue_list)} répliques, durée totale ~{total_dur:.2f}s")
-    print(f"[voice_elevenlabs] audio: {out_wav}")
-    print(f"[voice_elevenlabs] cues : {cues_json}")
+            dur = wav_duration_seconds(final_seg_wav)
+            tmp_wavs.append((final_seg_wav, speaker, text, dur))
+            total_duration += dur
 
+        concat_wavs([w for (w, _, __, ___) in tmp_wavs], out_wav)
 
+        # Reconstitue les cues cumulées
+        cues = []
+        cursor = 0.0
+        for (w, spk, txt, dur) in tmp_wavs:
+            d = wav_duration_seconds(w) or dur
+            cues.append({
+                "start": round(cursor, 3),
+                "end": round(cursor + d, 3),
+                "text": txt,
+                "speaker": spk
+            })
+            cursor += d
+
+        cues_json.write_text(json.dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[voice] OK -> {out_wav} ({round(cursor,2)}s), cues -> {cues_json}")
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+# ---------- Entry ----------
 if __name__ == "__main__":
     main()
