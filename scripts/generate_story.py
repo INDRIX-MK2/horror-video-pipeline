@@ -48,7 +48,7 @@ def ask_openai(system_msg: str, user_msg: str) -> str:
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "gpt-4o-mini",
+        "model": "gpt-4o",
         "temperature": 1.0,
         "messages": [
             {"role":"system","content":system_msg},

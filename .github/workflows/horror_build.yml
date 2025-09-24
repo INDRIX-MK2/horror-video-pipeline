@@ -8,8 +8,8 @@ on:
 env:
   OUT_NAME: "final_horror.mp4"
   # Prompts (gérés côté script generate_story.py)
-  SYSTEM_PROMPT: 'Tu écris un script court et immersif d''horreur en français. N''inclue AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l''histoire.'
-  USER_PROMPT: 'Écris un script TikTok de ~180-200 mots. Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés.'
+  SYSTEM_PROMPT: 'Tu écris un script court et ultra immersif d''horreur en français. N''inclue AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l''histoire.'
+  USER_PROMPT: 'Écris un script TikTok ultra immerssif de ~180-200 mots. Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés.'
   # Chemins standards
   MANIFEST_FILE: "manifests/horreur.txt"
 
