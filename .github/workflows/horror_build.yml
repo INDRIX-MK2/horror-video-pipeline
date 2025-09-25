@@ -7,7 +7,6 @@ on:
 
 env:
   OUT_NAME: "final_horror.mp4"
-
   USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
   SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
   OPENAI_MODEL: "gpt-4o"
@@ -46,7 +45,7 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Validate secrets & folders
+      - name: Validate secrets & prepare folders
         run: |
           set -euo pipefail
           : "${OPENAI_API_KEY:?OPENAI_API_KEY manquant}"
@@ -57,8 +56,8 @@ jobs:
           : "${DROPBOX_REFRESH_TOKEN:?DROPBOX_REFRESH_TOKEN manquant}"
           mkdir -p story audio selected_media subs final_video
 
-      # ---------- 1) Génération du script ----------
-      - name: Generate story (GPT-4o temp=1, no stage directions)
+      # 1) Story
+      - name: Generate story (GPT-4o, temp=1, no stage directions)
         run: |
           set -euo pipefail
           python scripts/generate_story.py \
@@ -74,8 +73,8 @@ jobs:
           wc -w story/story.txt || true
           sed -n '1,10p' story/story.txt || true
 
-      # ---------- 2) Voix ElevenLabs ----------
-      - name: Synthesize voice
+      # 2) TTS
+      - name: Synthesize voice (ElevenLabs)
         run: |
           set -euo pipefail
           python scripts/voice_elevenlabs.py \
@@ -87,23 +86,25 @@ jobs:
           set -euo pipefail
           ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav
 
-      # ---------- 3) Sélection + Merge vidéo ----------
+      # 3) Select & merge clips —> **ajout de --audio**
       - name: Select & merge clips from manifest (absolute list, no count limit)
         run: |
           set -euo pipefail
           [ -s "manifests/horreur.txt" ] || { echo "manifests/horreur.txt manquant/vide"; exit 1; }
           python scripts/select_and_merge.py \
             --manifest manifests/horreur.txt \
+            --audio audio/voice.wav \
             --out selected_media/merged.mp4 \
             --abs-list
 
       - name: Probe merged video
         run: |
           set -euo pipefail
-          ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,duration \
+          ffprobe -v error -select_streams v:0 \
+            -show_entries stream=width,height,avg_frame_rate,duration \
             -of default=nk=1:nw=1 selected_media/merged.mp4 || true
 
-      # ---------- 4) Sous-titres ----------
+      # 4) Subtitles (ASS)
       - name: Build ASS subtitles
         run: |
           set -euo pipefail
@@ -118,7 +119,7 @@ jobs:
           [ -s subs/captions.ass ] || { echo "captions.ass manquant/vide"; exit 1; }
           head -n 30 subs/captions.ass || true
 
-      # ---------- 5) Rendu final ----------
+      # 5) Render final
       - name: Render final video (effects + subtitles, cut to audio length)
         run: |
           set -euo pipefail
@@ -134,7 +135,7 @@ jobs:
           ls -lh final_video || true
           ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "final_video/${OUT_NAME}" || true
 
-      # ---------- 6) Artifacts ----------
+      # 6) Artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -145,8 +146,8 @@ jobs:
             selected_media/
             final_video/
 
-      # ---------- 7) Upload to Dropbox ----------
-      - name: Upload to Dropbox (refresh-token)
+      # 7) Dropbox upload (refresh token)
+      - name: Upload to Dropbox
         run: |
           set -euo pipefail
           python scripts/dropbox_upload.py \
