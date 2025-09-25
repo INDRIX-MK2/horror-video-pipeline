@@ -1,75 +1,58 @@
 #!/usr/bin/env python3
-import os, json, pathlib, re, sys, time
-import requests
+import os, json, sys, pathlib, urllib.request, re
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-STORY_DIR = ROOT / "story"
-STORY_DIR.mkdir(parents=True, exist_ok=True)
-OUT = STORY_DIR / "story.txt"
+OUT_DIR = pathlib.Path("story")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_FILE = OUT_DIR / "story.txt"
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+if not API_KEY:
+    print("OPENAI_API_KEY manquant", file=sys.stderr); sys.exit(1)
+
 SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "").strip()
-USER_PROMPT = os.environ.get("USER_PROMPT", "").strip()
+USER_PROMPT   = os.environ.get("USER_PROMPT", "").strip()
+if not USER_PROMPT:
+    print("USER_PROMPT manquant", file=sys.stderr); sys.exit(1)
 
-if not OPENAI_API_KEY:
-    print("OPENAI_API_KEY manquant", file=sys.stderr)
-    sys.exit(1)
-
-if not SYSTEM_PROMPT or not USER_PROMPT:
-    print("Prompts manquants (SYSTEM_PROMPT/USER_PROMPT)", file=sys.stderr)
-    sys.exit(1)
-
-def remove_stage_directions(text: str) -> str:
-    t = text
-    # Supprimer lignes avec didascalies typiques
-    patterns = [
-        r'^\s*(intro|hook|scène|scene|narrateur|développement|conclusion|cta)\s*[:\-–].*$',
-        r'^\s*\(.*?\)\s*$',
-        r'^\s*\[.*?\]\s*$',
+payload = {
+    "model": "gpt-4o-mini",
+    "temperature": 1,
+    "messages": [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": USER_PROMPT}
     ]
-    for pat in patterns:
-        t = re.sub(pat, "", t, flags=re.IGNORECASE | re.MULTILINE)
+}
+req = urllib.request.Request(
+    "https://api.openai.com/v1/chat/completions",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    method="POST"
+)
 
-    # Enlever mentions inline type "Narrateur:" au début de phrases
-    t = re.sub(r'(?im)^(?:narrateur|voix off|locuteur)\s*:\s*', '', t)
+try:
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+except Exception as e:
+    print(f"Erreur OpenAI: {e}", file=sys.stderr); sys.exit(1)
 
-    # Nettoyages divers
-    t = t.replace('“', '"').replace('”', '"')
-    t = t.replace('«', '').replace('»', '')
-    t = re.sub(r'^\s*["\']\s*', '', t)
-    t = re.sub(r'\s*["\']\s*$', '', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
+text = (text or "").strip()
+if not text:
+    print("Réponse vide du modèle", file=sys.stderr); sys.exit(1)
 
-def ask_openai(system_msg: str, user_msg: str) -> str:
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4o",
-        "temperature": 1.0,
-        "messages": [
-            {"role":"system","content":system_msg},
-            {"role":"user","content":user_msg}
-        ]
-    }
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
-    if r.status_code != 200:
-        print(f"OpenAI HTTP {r.status_code}: {r.text[:300]}", file=sys.stderr)
-        sys.exit(1)
-    data = r.json()
-    txt = data["choices"][0]["message"]["content"]
-    return txt
+# Nettoyage: supprime didascalies et mentions de voix
+lines = []
+for raw in text.splitlines():
+    s = raw.strip()
+    # retire balises entre [] ou ()
+    s = re.sub(r"\[[^\]]+\]", "", s)
+    s = re.sub(r"\([^)]+\)", "", s)
+    # retire préfixes de didascalies
+    for pref in ("intro", "hook", "scène", "scene", "narrateur", "cta", "voix 1", "voix 2", "voice 1", "voice 2"):
+        if s.lower().startswith(pref + ":"):
+            s = s.split(":",1)[1].strip()
+    if s:
+        lines.append(s)
 
-raw = ask_openai(SYSTEM_PROMPT, USER_PROMPT)
-clean = remove_stage_directions(raw)
-
-# garde bornes ~180-200 mots (on n’échoue pas si >, on normalise un peu)
-words = clean.split()
-if len(words) > 230:
-    clean = " ".join(words[:230]).rstrip(" ,;:-") + "."
-
-OUT.write_text(clean, encoding="utf-8")
-print(f"Story saved to {OUT} ({len(clean.split())} mots)")
+OUT_FILE.write_text("\n".join(lines), encoding="utf-8")
+print(f"[generate_story] story écrit: {OUT_FILE} ({len(lines)} lignes)")

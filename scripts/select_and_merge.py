@@ -1,136 +1,108 @@
-# scripts/select_and_merge.py
-import os, sys, time, json, shutil, pathlib, subprocess, urllib.request, urllib.error, random
+#!/usr/bin/env python3
+import argparse, pathlib, sys, os, urllib.request, tempfile, subprocess, shlex, random
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-MANIFEST = pathlib.Path(os.environ.get("MANIFEST_FILE", "manifests/horreur.txt")).resolve()
-VOICE_WAV = pathlib.Path(os.environ.get("VOICE_WAV", "audio/voice.wav")).resolve()
-WORKDIR = ROOT / "selected_media"
-DL_DIR = WORKDIR / "downloaded"
-SEG_DIR = WORKDIR / "segments"
-LIST_FILE = WORKDIR / "list.txt"
-MERGED = WORKDIR / "merged.mp4"
+ap = argparse.ArgumentParser()
+ap.add_argument("--manifest", required=True, help="Fichier texte : 1 URL .mp4 par ligne (Dropbox ?dl=1)")
+ap.add_argument("--audio", required=True, help="audio/voice.wav pour calculer la durée cible")
+ap.add_argument("--out", required=True, help="selected_media/merged.mp4")
+args = ap.parse_args()
 
-# ---- util
-def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+manifest = pathlib.Path(args.manifest)
+audio = pathlib.Path(args.audio)
+out = pathlib.Path(args.out)
 
-def ffprobe_duration(p: pathlib.Path) -> float:
+out.parent.mkdir(parents=True, exist_ok=True)
+work = out.parent  # selected_media
+raw_dir = work / "raw"
+enc_dir = work / "enc"
+raw_dir.mkdir(exist_ok=True)
+enc_dir.mkdir(exist_ok=True)
+
+if not manifest.exists() or not manifest.stat().st_size:
+    print(f"Manifest introuvable/vide: {manifest}", file=sys.stderr); sys.exit(1)
+if not audio.exists() or not audio.stat().st_size:
+    print(f"Audio introuvable/vide: {audio}", file=sys.stderr); sys.exit(1)
+
+def ff_ok():
+    try: subprocess.run(["ffmpeg","-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return True
+    except: return False
+def fp_ok():
+    try: subprocess.run(["ffprobe","-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return True
+    except: return False
+if not (ff_ok() and fp_ok()):
+    print("ffmpeg/ffprobe manquants", file=sys.stderr); sys.exit(1)
+
+def dur_media(p):
+    outp = subprocess.check_output([
+        "ffprobe","-v","error","-select_streams","v:0","-show_entries","stream=duration",
+        "-of","default=nk=1:nw=1", str(p)
+    ]).decode("utf-8","ignore").strip()
+    try: return float(outp)
+    except: return 0.0
+
+def dur_audio(p):
+    outp = subprocess.check_output([
+        "ffprobe","-v","error","-show_entries","format=duration",
+        "-of","default=nk=1:nw=1", str(p)
+    ]).decode("utf-8","ignore").strip()
+    try: return float(outp)
+    except: return 0.0
+
+target = max(0.01, dur_audio(audio))
+
+# 1) Lire URLs
+urls = [ln.strip() for ln in manifest.read_text(encoding="utf-8").splitlines() if ln.strip()]
+if not urls:
+    print("Aucune URL dans le manifest", file=sys.stderr); sys.exit(1)
+
+# 2) Télécharger → raw/clip_N.mp4
+dl_paths = []
+for i,u in enumerate(urls, start=1):
     try:
-        out = run([
-            "ffprobe","-v","error","-show_entries","format=duration",
-            "-of","default=nokey=1:noprint_wrappers=1", str(p)
-        ]).stdout.strip()
-        return float(out) if out else 0.0
-    except Exception:
-        return 0.0
+        fn = raw_dir / f"clip_{i:03d}.mp4"
+        # urllib récupère tout en mémoire si file://, sinon HTTP
+        with urllib.request.urlopen(u, timeout=120) as resp, open(fn, "wb") as f:
+            f.write(resp.read())
+        dl_paths.append(fn)
+    except Exception as e:
+        print(f"Skip URL {u}: {e}", file=sys.stderr)
 
-def ensure_dirs():
-    WORKDIR.mkdir(parents=True, exist_ok=True)
-    DL_DIR.mkdir(parents=True, exist_ok=True)
-    SEG_DIR.mkdir(parents=True, exist_ok=True)
-    # reset list.txt
-    if LIST_FILE.exists(): LIST_FILE.unlink()
+if not dl_paths:
+    print("Aucun clip téléchargé", file=sys.stderr); sys.exit(1)
 
-def read_manifest() -> list[str]:
-    if not MANIFEST.exists():
-        print(f"Manifest introuvable: {MANIFEST}", file=sys.stderr)
-        sys.exit(1)
-    lines = [l.strip() for l in MANIFEST.read_text(encoding="utf-8").splitlines()]
-    urls = [l for l in lines if l and not l.startswith("#")]
-    if not urls:
-        print("Manifest vide.", file=sys.stderr); sys.exit(1)
-    return urls
+# 3) Ré-encoder chaque clip en 1080x1920/30fps, h264 yuv420p sans audio
+enc_paths = []
+for i,src in enumerate(dl_paths, start=1):
+    outp = enc_dir / f"seg_{i:03d}.mp4"
+    cmd = [
+        "ffmpeg","-nostdin","-y","-i",str(src),
+        "-vf","scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
+        "-r","30","-c:v","libx264","-crf","18","-pix_fmt","yuv420p",
+        "-an", str(outp)
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    enc_paths.append(outp)
 
-def download(url: str, dst: pathlib.Path) -> bool:
-    try:
-        # suit les redirections; timeout court; user-agent explicite
-        req = urllib.request.Request(url, headers={"User-Agent":"curl/8"})
-        with urllib.request.urlopen(req, timeout=60) as r, open(dst, "wb") as f:
-            shutil.copyfileobj(r, f)
-        return dst.stat().st_size > 0
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
-        print(f"[DL] Échec {url}: {e}", file=sys.stderr)
-        return False
+# 4) Sélectionner assez de segments pour couvrir la durée audio
+sel = []
+total = 0.0
+i = 0
+while total < target + 0.3:  # petite marge
+    p = enc_paths[i % len(enc_paths)]
+    d = dur_media(p)
+    sel.append((p, d))
+    total += d
+    i += 1
 
-def reencode(src: pathlib.Path, out: pathlib.Path) -> bool:
-    try:
-        run([
-            "ffmpeg","-nostdin","-y","-i",str(src),
-            "-vf","scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
-            "-r","30","-c:v","libx264","-crf","18","-pix_fmt","yuv420p","-an",
-            str(out)
-        ])
-        return out.exists() and out.stat().st_size>0
-    except subprocess.CalledProcessError as e:
-        print(f"[ENC] Échec {src.name}: {e.stderr}", file=sys.stderr)
-        return False
+# 5) Concat via concat demuxer avec CHEMINS ABSOLUS (imparable)
+list_file = work / "list.txt"
+with list_file.open("w", encoding="utf-8") as f:
+    for p,_ in sel:
+        f.write(f"file '{p.resolve().as_posix()}'\n")
 
-def abs_write_list(paths: list[pathlib.Path]):
-    with open(LIST_FILE, "w", encoding="utf-8") as f:
-        for p in paths:
-            f.write(f"file '{p.as_posix()}'\n")
+subprocess.run([
+    "ffmpeg","-nostdin","-y","-f","concat","-safe","0","-i",str(list_file),
+    "-c","copy", str(out)
+], check=True)
 
-def concat_to_merged():
-    run(["ffmpeg","-nostdin","-y","-f","concat","-safe","0","-i",str(LIST_FILE),"-c","copy",str(MERGED)])
-
-# ---- main
-def main():
-    ensure_dirs()
-
-    # durée réelle de la voix = cible
-    if not VOICE_WAV.exists():
-        print(f"Audio introuvable: {VOICE_WAV}", file=sys.stderr); sys.exit(1)
-    target = ffprobe_duration(VOICE_WAV)
-    if target <= 0:
-        print("Durée audio invalide.", file=sys.stderr); sys.exit(1)
-    print(f"[INFO] Durée voix cible: {target:.3f}s")
-
-    urls = read_manifest()
-    random.shuffle(urls)  # ordre aléatoire
-
-    used_segments: list[pathlib.Path] = []
-    total = 0.0
-    idx = 0
-
-    for i, url in enumerate(urls, start=1):
-        # nom local déterministe
-        ext = ".mp4"
-        # déduire l'extension si visible
-        for e in (".mp4",".mov",".mkv",".webm"):
-            if e in url.lower():
-                ext = e; break
-        dl_path = DL_DIR / f"src_{i:03d}{ext}"
-        ok = download(url, dl_path)
-        if not ok:
-            continue
-
-        idx += 1
-        seg_out = SEG_DIR / f"seg_{idx}.mp4"
-        if not reencode(dl_path, seg_out):
-            continue
-
-        d = ffprobe_duration(seg_out)
-        if d <= 0.1:
-            continue
-
-        used_segments.append(seg_out)
-        total += d
-        print(f"[ADD] {seg_out.name} (+{d:.2f}s) => cumul {total:.2f}s")
-
-        if total >= target:
-            break
-
-    if not used_segments:
-        print("Aucun segment utilisable.", file=sys.stderr); sys.exit(1)
-
-    abs_write_list(used_segments)
-    print(f"[INFO] list.txt écrit (absolu) avec {len(used_segments)} segments.")
-
-    concat_to_merged()
-    if not MERGED.exists() or MERGED.stat().st_size == 0:
-        print("Concat échouée.", file=sys.stderr); sys.exit(1)
-
-    print(f"[OK] merged => {MERGED} (≈ {ffprobe_duration(MERGED):.2f}s)")
-
-if __name__ == "__main__":
-    main()
+print(f"[select_and_merge] écrit: {out} (couverture ~{total:.2f}s pour audio {target:.2f}s)")
