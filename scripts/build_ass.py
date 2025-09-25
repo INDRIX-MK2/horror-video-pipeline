@@ -94,7 +94,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,{args.font},{args.size},&H00FFFF99,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,5,40,40,200,1
+Style: TikTok,{args.font},{args.size},&H00FFFF00,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,5,40,40,200,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

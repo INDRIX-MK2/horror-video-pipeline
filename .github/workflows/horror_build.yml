@@ -1,4 +1,4 @@
-﻿name: Horror TikTok Builder (no-heredoc, full pipeline)
+﻿name: Horror TikTok Builder (no-heredoc)
 
 on:
   workflow_dispatch:
@@ -7,9 +7,11 @@ on:
 
 env:
   OUT_NAME: "final_horror.mp4"
+
+  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
   SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
-  USER_PROMPT: "Écris un script TikTok immerssif de 180 à 200 mots (65-75s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés."
-  MANIFEST_FILE: "manifests/horreur.txt"   # URLs (Dropbox dl=1), une par ligne.
+  OPENAI_MODEL: "gpt-4o"
+  OPENAI_TEMPERATURE: "1"
 
 jobs:
   build:
@@ -17,116 +19,136 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-      ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}           # 1 voix
-      # Pour 2 voix, commente la ligne ci-dessus et décommente celles-ci :
-      # ELEVENLABS_VOICE_ID_V1: ${{ secrets.ELEVENLABS_VOICE_ID_V1 }}   # Voix 1
-      # ELEVENLABS_VOICE_ID_V2: ${{ secrets.ELEVENLABS_VOICE_ID_V2 }}   # Voix 2
-
-      # Dropbox (mode refresh recommandé, fallback access token)
+      ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-      DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python + ffmpeg
-        shell: bash
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install FFmpeg
         run: |
           set -euo pipefail
-          python3 --version
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg jq
+          sudo apt-get install -y ffmpeg
 
-      - name: Sanity check secrets & inputs
-        shell: bash
+      - name: Install Python dependencies
         run: |
           set -euo pipefail
-          [ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY manquant"; exit 1; }
-          [ -n "${ELEVENLABS_API_KEY:-}" ] || { echo "ELEVENLABS_API_KEY manquant"; exit 1; }
-          if [ -z "${ELEVENLABS_VOICE_ID:-}" ] && { [ -z "${ELEVENLABS_VOICE_ID_V1:-}" ] || [ -z "${ELEVENLABS_VOICE_ID_V2:-}" ]; }; then
-            echo "Configure ELEVENLABS_VOICE_ID (1 voix) OU ELEVENLABS_VOICE_ID_V1+V2 (2 voix)"; exit 1;
-          fi
-          [ -s "${MANIFEST_FILE}" ] || { echo "Manifest URLs introuvable ou vide: ${MANIFEST_FILE}"; exit 1; }
+          python -V
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Generate story (story/story.txt)
-        shell: bash
+      - name: Validate secrets & folders
         run: |
           set -euo pipefail
-          mkdir -p story
-          python3 scripts/generate_story.py
-          [ -s story/story.txt ] || { echo "story/story.txt vide"; exit 1; }
-          echo "---- STORY (aperçu) ----"
-          nl -ba story/story.txt | sed -n '1,80p'
+          : "${OPENAI_API_KEY:?OPENAI_API_KEY manquant}"
+          : "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY manquant}"
+          : "${ELEVENLABS_VOICE_ID:?ELEVENLABS_VOICE_ID manquant}"
+          : "${DROPBOX_APP_KEY:?DROPBOX_APP_KEY manquant}"
+          : "${DROPBOX_APP_SECRET:?DROPBOX_APP_SECRET manquant}"
+          : "${DROPBOX_REFRESH_TOKEN:?DROPBOX_REFRESH_TOKEN manquant}"
+          mkdir -p story audio selected_media subs final_video
 
-      - name: ElevenLabs TTS -> audio/voice.wav + audio/dialogue_cues.json
-        shell: bash
+      # ---------- 1) Génération du script ----------
+      - name: Generate story (GPT-4o temp=1, no stage directions)
         run: |
           set -euo pipefail
-          mkdir -p audio
-          python3 scripts/voice_elevenlabs.py \
+          python scripts/generate_story.py \
+            --system "$SYSTEM_PROMPT" \
+            --user "$USER_PROMPT" \
+            --model "$OPENAI_MODEL" \
+            --temperature "$OPENAI_TEMPERATURE" \
+            --out story/story.txt
+
+      - name: Show story length
+        run: |
+          set -euo pipefail
+          wc -w story/story.txt || true
+          sed -n '1,10p' story/story.txt || true
+
+      # ---------- 2) Voix ElevenLabs ----------
+      - name: Synthesize voice
+        run: |
+          set -euo pipefail
+          python scripts/voice_elevenlabs.py \
             --transcript story/story.txt \
-            --out audio/voice.wav \
-            --cues audio/dialogue_cues.json
-          [ -s audio/voice.wav ] || { echo "audio/voice.wav introuvable"; exit 1; }
-          [ -s audio/dialogue_cues.json ] || { echo "audio/dialogue_cues.json introuvable"; exit 1; }
+            --out audio/voice.wav
 
-      - name: Build ASS subtitles (subs/captions.ass) basé sur durée audio (Option A)
-        shell: bash
+      - name: Probe audio duration
         run: |
           set -euo pipefail
-          mkdir -p subs
-          python3 scripts/build_ass.py \
+          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav
+
+      # ---------- 3) Sélection + Merge vidéo ----------
+      - name: Select & merge clips from manifest (absolute list, no count limit)
+        run: |
+          set -euo pipefail
+          [ -s "manifests/horreur.txt" ] || { echo "manifests/horreur.txt manquant/vide"; exit 1; }
+          python scripts/select_and_merge.py \
+            --manifest manifests/horreur.txt \
+            --out selected_media/merged.mp4 \
+            --abs-list
+
+      - name: Probe merged video
+        run: |
+          set -euo pipefail
+          ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,duration \
+            -of default=nk=1:nw=1 selected_media/merged.mp4 || true
+
+      # ---------- 4) Sous-titres ----------
+      - name: Build ASS subtitles
+        run: |
+          set -euo pipefail
+          python scripts/build_ass.py \
             --transcript story/story.txt \
             --audio audio/voice.wav \
             --out subs/captions.ass
-          [ -s subs/captions.ass ] || { echo "subs/captions.ass introuvable"; exit 1; }
 
-      - name: Select clips & merge (en fonction de la durée audio)
-        shell: bash
+      - name: Check subtitles
         run: |
           set -euo pipefail
-          mkdir -p selected_media
-          python3 scripts/select_and_merge.py \
-            --manifest "${MANIFEST_FILE}" \
-            --audio audio/voice.wav \
-            --out selected_media/merged.mp4
-          [ -s selected_media/merged.mp4 ] || { echo "merged.mp4 introuvable"; exit 1; }
+          [ -s subs/captions.ass ] || { echo "captions.ass manquant/vide"; exit 1; }
+          head -n 30 subs/captions.ass || true
 
-      - name: Render final (superposition sous-titres) -> final_video/${OUT_NAME}
-        shell: bash
+      # ---------- 5) Rendu final ----------
+      - name: Render final video (effects + subtitles, cut to audio length)
         run: |
           set -euo pipefail
-          mkdir -p final_video
-          python3 scripts/render_final.py \
+          python scripts/render_final.py \
             --video selected_media/merged.mp4 \
             --audio audio/voice.wav \
-            --ass subs/captions.ass \
+            --subs subs/captions.ass \
             --output "final_video/${OUT_NAME}"
-          [ -s "final_video/${OUT_NAME}" ] || { echo "final_video manquant"; exit 1; }
 
-      - name: Upload to Dropbox (stable refresh token si dispo)
-        shell: bash
+      - name: Show final info
         run: |
           set -euo pipefail
-          python3 scripts/dropbox_upload.py \
-            --file "final_video/${OUT_NAME}" \
-            --remote-dir "/horror" \
-            --out-link "final_video/dropbox_link.txt"
-          [ -s final_video/dropbox_link.txt ] || { echo "dropbox_link.txt manquant"; exit 1; }
-          echo "Dropbox link: $(cat final_video/dropbox_link.txt)"
+          ls -lh final_video || true
+          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "final_video/${OUT_NAME}" || true
 
+      # ---------- 6) Artifacts ----------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: final-assets
+          name: run_outputs
           path: |
-            story/story.txt
-            audio/voice.wav
-            audio/dialogue_cues.json
-            subs/captions.ass
-            selected_media/merged.mp4
-            final_video/${{ env.OUT_NAME }}
-            final_video/dropbox_link.txt
+            story/
+            subs/
+            selected_media/
+            final_video/
+
+      # ---------- 7) Upload to Dropbox ----------
+      - name: Upload to Dropbox (refresh-token)
+        run: |
+          set -euo pipefail
+          python scripts/dropbox_upload.py \
+            --file "final_video/${OUT_NAME}" \
+            --remote-dir "/horror"
