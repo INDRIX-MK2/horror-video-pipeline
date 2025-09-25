@@ -6,7 +6,7 @@ ap.add_argument("--transcript", required=True)
 ap.add_argument("--audio", required=True)
 ap.add_argument("--out", default="subs/captions.ass")
 ap.add_argument("--font", default="Arial")
-ap.add_argument("--size", type=int, default=20)   # tu pourras changer à la volée
+ap.add_argument("--size", type=int, default=60)   # tu pourras changer à la volée
 args = ap.parse_args()
 
 tpath = pathlib.Path(args.transcript)
@@ -78,7 +78,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,{args.font},{args.size},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,0,2,40,40,120,1
+Style: TikTok,{args.font},{args.size},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,0,2,40,40,200,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
