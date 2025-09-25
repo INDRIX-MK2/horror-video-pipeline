@@ -8,7 +8,7 @@ on:
 env:
   OUT_NAME: "final_horror.mp4"
   SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
-  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+  USER_PROMPT: "Écris un script TikTok immerssif de 180 à 200 mots (65-75s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés."
   MANIFEST_FILE: "manifests/horreur.txt"   # URLs (Dropbox dl=1), une par ligne.
 
 jobs:
