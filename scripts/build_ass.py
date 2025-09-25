@@ -42,7 +42,7 @@ raw = re.sub(r"\[[^\]]+\]", "", raw)
 raw = re.sub(r"\([^)]+\)", "", raw)
 lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
-# S'il n'y a qu'une ligne, on la coupe tous les ~7 mots pour l’écran
+# S'il n'y a qu'une ligne, on la coupe tous les ~4 mots pour l’écran
 words = []
 for ln in lines:
     words.extend(ln.split())
@@ -51,7 +51,7 @@ chunks = []
 buf = []
 for i,w in enumerate(words, start=1):
     buf.append(w)
-    if len(buf) >= 7:          # 7 mots par ligne (approx)
+    if len(buf) >= 4:          # 4 mots par ligne (approx)
         chunks.append(" ".join(buf)); buf=[]
 if buf:
     chunks.append(" ".join(buf))
@@ -78,7 +78,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,{args.font},{args.size},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,0,2,40,40,200,1
+Style: TikTok,{args.font},{args.size},&H007FFF00,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,5,40,40,200,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
