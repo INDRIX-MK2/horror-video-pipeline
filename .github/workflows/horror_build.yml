@@ -7,7 +7,7 @@ on:
 
 env:
   OUT_NAME: "final_horror.mp4"
-  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés."
+  USER_PROMPT: "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés."
   SYSTEM_PROMPT: "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire."
   OPENAI_MODEL: "gpt-4o"
   OPENAI_TEMPERATURE: "1"
@@ -86,16 +86,15 @@ jobs:
           set -euo pipefail
           ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav
 
-      # 3) Select & merge clips —> **ajout de --audio**
-      - name: Select & merge clips from manifest (absolute list, no count limit)
+      # 3) Select & merge clips —> **sans --abs-list**
+      - name: Select & merge clips from manifest (absolute list, duration = audio)
         run: |
           set -euo pipefail
           [ -s "manifests/horreur.txt" ] || { echo "manifests/horreur.txt manquant/vide"; exit 1; }
           python scripts/select_and_merge.py \
             --manifest manifests/horreur.txt \
             --audio audio/voice.wav \
-            --out selected_media/merged.mp4 \
-            --abs-list
+            --out selected_media/merged.mp4
 
       - name: Probe merged video
         run: |
