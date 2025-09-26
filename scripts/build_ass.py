@@ -11,7 +11,7 @@ ap.add_argument("--transcript", required=True, help="Fichier texte contenant la 
 ap.add_argument("--audio", required=True, help="Fichier audio pour calculer la durée totale")
 ap.add_argument("--out", default="subs/captions.ass", help="Fichier de sortie ASS")
 ap.add_argument("--font", default="Arial", help="Police utilisée pour les sous-titres")
-ap.add_argument("--size", type=int, default=60, help="Taille de la police des sous-titres")
+ap.add_argument("--size", type=int, default=80, help="Taille de la police des sous-titres")
 ap.add_argument("--words-line", type=int, default=4, help="Nombre max de mots par ligne")
 args = ap.parse_args()
 
