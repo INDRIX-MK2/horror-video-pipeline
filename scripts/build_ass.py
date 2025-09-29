@@ -1,15 +1,35 @@
 #!/usr/bin/env python3
-import sys, argparse, pathlib, subprocess, re
-from typing import List, Tuple
+# -*- coding: utf-8 -*-
 
-ap = argparse.ArgumentParser(description="Construit un .ass simple synchronisé sur la durée audio")
-ap.add_argument("--transcript", required=True, help="Texte narratif (story.txt)")
-ap.add_argument("--audio",      required=True, help="Fichier audio (voice.wav)")
-ap.add_argument("--out",        default="subtitles/captions.ass", help="Sortie .ass")
-ap.add_argument("--font",       default="Arial", help="Police")
-ap.add_argument("--size",       type=int, default=80, help="Taille police")
-ap.add_argument("--offset",     type=float, default=0.0,
-                help="Décalage global en secondes (positif = sous-titres plus tard)")
+"""
+Génère un .ASS (karaoké simple) à partir d'un transcript texte et d'un audio.
+- Découpe par phrases.
+- Force 2 lignes par sous-titre (par défaut), avec N mots max par ligne.
+- Répartit la durée totale de l'audio proportionnellement au nombre de mots.
+- Style par défaut lisible en ambiance sombre (jaune pâle + contour noir).
+"""
+
+import sys, argparse, pathlib, subprocess, re
+
+# ----------------------------
+# Arguments simples à retenir
+# ----------------------------
+ap = argparse.ArgumentParser()
+ap.add_argument("--transcript", required=True, help="Chemin du texte (ex: story/story.txt)")
+ap.add_argument("--audio", required=True, help="Chemin du WAV/MP3 (ex: audio/voice.wav)")
+ap.add_argument("--out", default="subs/captions.ass", help="Chemin .ass de sortie")
+ap.add_argument("--font", default="Arial", help="Police ASS")
+ap.add_argument("--size", type=int, default=60, help="Taille de police (ex: 60)")
+ap.add_argument("--align", type=int, default=5, help="Alignment ASS (5 = centré bas)")
+ap.add_argument("--margin-v", type=int, default=200, help="Marge verticale (px)")
+ap.add_argument("--words-per-line", type=int, default=4, help="Mots max par ligne")
+ap.add_argument("--max-lines", type=int, default=2, help="Lignes max par sous-titre (2 ou 3)")
+ap.add_argument("--min-chunk", type=float, default=1.2, help="Durée min d’un sous-titre (s)")
+ap.add_argument("--primary-colour", default="&H0080FFF3", help="Couleur texte (BGRx, ex: jaune pâle)")
+ap.add_argument("--outline-colour", default="&H00000000", help="Couleur contour (noir)")
+ap.add_argument("--back-colour", default="&H64000000", help="Fond (noir alpha)")
+ap.add_argument("--outline", type=int, default=3, help="Épaisseur contour")
+ap.add_argument("--shadow", type=int, default=2, help="Ombre")
 args = ap.parse_args()
 
 tpath = pathlib.Path(args.transcript)
@@ -22,117 +42,162 @@ if not tpath.exists() or not tpath.stat().st_size:
 if not apath.exists() or not apath.stat().st_size:
     print("Audio introuvable/vide", file=sys.stderr); sys.exit(1)
 
-def dur_audio(p: pathlib.Path) -> float:
+# ----------------------------
+# Utilitaires
+# ----------------------------
+def ffprobe_duration(p: pathlib.Path) -> float:
     try:
         out = subprocess.check_output([
-            "ffprobe","-v","error","-show_entries","format=duration",
+            "ffprobe","-v","error",
+            "-show_entries","format=duration",
             "-of","default=nk=1:nw=1", str(p)
         ]).decode("utf-8","ignore").strip()
-        return float(out)
+        return max(0.01, float(out))
     except Exception:
-        return 0.0
+        return 0.01
 
 def to_ass_ts(sec: float) -> str:
-    if sec < 0: sec = 0.0
+    if sec < 0: sec = 0
     h = int(sec // 3600)
     m = int((sec % 3600) // 60)
     s = int(sec % 60)
     cs = int(round((sec - int(sec)) * 100))
+    if cs >= 100:
+        s += 1
+        cs -= 100
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
-audio_dur = max(0.01, dur_audio(apath))
+RE_STAGE = re.compile(
+    r"^\s*(?:\[(?:[^\]]+)\]|\((?:[^)]+)\)|(?:intro|hook|scène|scene|narrateur|voix\s*\d+)\s*:)\s*",
+    flags=re.IGNORECASE,
+)
 
-# ==========================
-#  Lecture + segmentation en phrases
-# ==========================
-raw = tpath.read_text(encoding="utf-8")
+def clean_text(s: str) -> str:
+    # supprime didascalies/directions évidentes
+    s = RE_STAGE.sub("", s.strip())
+    # retire tags entre [] ou ()
+    s = re.sub(r"\[[^\]]+\]", "", s)
+    s = re.sub(r"\([^)]+\)", "", s)
+    # normalise espaces
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-# On retire les didascalies / apartés éventuels
-raw = re.sub(r"\[[^\]]+\]", "", raw)
-raw = re.sub(r"\([^)]+\)", "", raw)
+def split_sentences(text: str):
+    # découpe par ponctuation forte, en gardant le séparateur
+    parts = re.split(r"([\.!?…]+)", text)
+    out = []
+    buf = ""
+    for i in range(0, len(parts), 2):
+        chunk = parts[i].strip()
+        sep = parts[i+1] if i+1 < len(parts) else ""
+        if not chunk and not sep:
+            continue
+        buf = (chunk + sep).strip()
+        if buf:
+            out.append(buf)
+    # fallback si rien
+    if not out:
+        out = [text.strip()]
+    return out
 
-# Split en phrases, en gardant la ponctuation
-sentences: List[str] = []
-buf = []
-for token in re.split(r"(\.|\!|\?|…)", raw):
-    if token is None:
+def ass_escape(s: str) -> str:
+    # évite interprétation de { \ } en tags ASS
+    s = s.replace("\\", r"\\")
+    s = s.replace("{", r"\{").replace("}", r"\}")
+    return s
+
+def wrap_to_lines(words, max_lines=2, words_per_line=4):
+    """
+    Force max_lines (2 ou 3). Répartit les mots en lignes équilibrées,
+    en limitant ~ words_per_line par ligne.
+    """
+    if max_lines < 1: max_lines = 1
+    # chunking brut d’abord
+    chunks = []
+    buf = []
+    for w in words:
+        buf.append(w)
+        if len(buf) >= words_per_line:
+            chunks.append(" ".join(buf)); buf=[]
+    if buf:
+        chunks.append(" ".join(buf))
+
+    if not chunks:
+        return [""]
+
+    # Si trop de chunks, merge jusqu'à ne garder que max_lines
+    while len(chunks) > max_lines:
+        # merge les deux plus courts
+        lengths = [len(c.split()) for c in chunks]
+        # trouve l’index du plus court
+        i = lengths.index(min(lengths))
+        # fusionne avec voisin (prend celui qui équilibre le mieux)
+        if i < len(chunks)-1:
+            chunks[i] = chunks[i] + " " + chunks[i+1]
+            del chunks[i+1]
+        else:
+            chunks[i-1] = chunks[i-1] + " " + chunks[i]
+            del chunks[i]
+
+    # Si moins de lignes que max_lines, on peut laisser tel quel (pas besoin de remplir)
+    return chunks
+
+# ----------------------------
+# Lecture et préparation texte
+# ----------------------------
+raw = tpath.read_text(encoding="utf-8", errors="ignore")
+# coupe par lignes, nettoie chaque ligne, puis recompose pour couper en phrases
+lines = [clean_text(ln) for ln in raw.splitlines() if clean_text(ln)]
+full_text = " ".join(lines).strip()
+sentences = split_sentences(full_text)
+
+# tokenisation mots / préparation des items (2 lignes forcées)
+items = []  # chaque item: (words:list[str], text_lines:list[str])
+total_words = 0
+for sent in sentences:
+    w = sent.split()
+    if not w:
         continue
-    token = token.strip()
-    if not token:
-        continue
-    buf.append(token)
-    # si le token est une ponctuation forte, on ferme la phrase
-    if token in [".", "!", "?", "…"]:
-        sentences.append("".join(buf).strip())
-        buf = []
-if buf:
-    sentences.append(" ".join(buf).strip())
+    total_words += len(w)
+    lines_wrapped = wrap_to_lines(w, max_lines=args.max_lines, words_per_line=args.words_per_line)
+    items.append((w, lines_wrapped))
 
-# Fallback si jamais rien
-if not sentences:
-    sentences = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+if not items:
+    print("Aucune phrase après nettoyage.", file=sys.stderr)
+    sys.exit(1)
 
-# ==========================
-#  Découpe chaque phrase en lignes (4-5 mots max, 2-3 lignes)
-# ==========================
-def wrap_words(phrase: str, max_words: int = 5, max_lines: int = 3) -> List[str]:
-    ws = phrase.split()
-    if not ws:
-        return []
-    lines = []
-    cur = []
-    for w in ws:
-        cur.append(w)
-        if len(cur) >= max_words:
-            lines.append(" ".join(cur)); cur = []
-            if len(lines) >= max_lines:
-                # si trop longue, on continue en “débordement” ligne par ligne
-                pass
-    if cur:
-        lines.append(" ".join(cur))
-    # si on dépasse max_lines, on fusionne la fin pour ne garder que max_lines
-    if len(lines) > max_lines:
-        head = lines[:max_lines-1]
-        tail = " ".join(lines[max_lines-1:])
-        lines = head + [tail]
-    return lines
-
-wrapped_sentences: List[List[str]] = [wrap_words(s, 5, 3) for s in sentences]
-wrapped_sentences = [ls for ls in wrapped_sentences if ls]  # enlève vides
-
-# ==========================
-#  Timing : proportionnel au nb de mots
-# ==========================
-def count_words(lines: List[str]) -> int:
-    return sum(len(l.split()) for l in lines)
-
-total_words = sum(count_words(ls) for ls in wrapped_sentences) or 1
-min_line = 0.60  # minimum par ligne pour lisibilité
-events: List[Tuple[float, float, str]] = []
-
+# ----------------------------
+# Timing proportionnel à l’audio
+# ----------------------------
+audio_dur = ffprobe_duration(apath)
 t = 0.0
-for lines in wrapped_sentences:
-    words_here = count_words(lines)
-    dur_here = max(len(lines) * min_line, audio_dur * (words_here / total_words))
-    # répartit équitablement entre les lignes de la phrase
-    per_line = max(min_line, dur_here / max(1, len(lines)))
-    for ln in lines:
-        s = t
-        e = min(audio_dur, s + per_line)
-        events.append((s, e, ln))
-        t = e
+events = []  # (start, end, text_with_newline)
+for w, lines_wrapped in items:
+    # part de durée proportionnelle au nb de mots
+    share = (len(w) / total_words) * audio_dur
+    # impose un minimum raisonnable
+    dur = max(args.min_chunk, share)
+    # si on dépasse la fin, on clippe le dernier
+    end = min(audio_dur, t + dur)
+    if end - t < 0.3 and end < audio_dur:
+        # si trop court, pousse un poil
+        end = min(audio_dur, t + 0.3)
 
-# Si on a un petit reliquat de temps audio, on l'ajoute à la dernière ligne
-if events and t < audio_dur:
-    s, e, txt = events[-1]
-    events[-1] = (s, audio_dur, txt)
+    # compose le texte avec \N pour forcer 2/3 lignes
+    text = ass_escape((" \\N ".join(lines_wrapped)).strip())
 
-# ==========================
-#  Header ASS (style TikTok centré bas, jaune pâle)
-#  PrimaryColour: &H00BBGGRR (0x00 alpha = opaque)
-#  Ici: &H007FFF00 ~ jaune pâle
-#  Outline=3, Shadow=2, Alignment=5 (bas-centré)
-# ==========================
+    events.append((t, end, text))
+    t = end
+
+# Ajustement final (éviter dépassement en flottants)
+if events and events[-1][1] > audio_dur:
+    last = list(events[-1])
+    last[1] = audio_dur
+    events[-1] = tuple(last)
+
+# ----------------------------
+# Écriture du header ASS + events
+# ----------------------------
 hdr = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -143,23 +208,15 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,{args.font},{args.size},&H007FFF00,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,5,40,40,200,1
+Style: TikTok,{args.font},{args.size},{args.primary_colour},&H00000000,{args.outline_colour},{args.back_colour},0,0,0,0,100,100,0,0,1,{args.outline},{args.shadow},{args.align},40,40,{args.margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """.replace("\r\n","\n")
 
-# ==========================
-#  Écriture avec offset global
-# ==========================
-def clamp0(x: float) -> float:
-    return x if x > 0 else 0.0
-
 with opath.open("w", encoding="utf-8") as f:
     f.write(hdr)
-    for s, e, txt in events:
-        s += args.offset; e += args.offset
-        s = clamp0(s);    e = clamp0(e)
+    for s,e,txt in events:
         f.write(f"Dialogue: 0,{to_ass_ts(s)},{to_ass_ts(e)},TikTok,,0,0,0,,{txt}\n")
 
 print(f"[build_ass] écrit: {opath} (durée audio détectée: {audio_dur:.2f}s)")
