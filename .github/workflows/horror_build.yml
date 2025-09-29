@@ -1,4 +1,4 @@
-﻿name: Horror TikTok Builder (no-heredoc, title-first + CTA)
+﻿name: Horror TikTok Builder (no-heredoc)
 
 on:
   workflow_dispatch:
@@ -6,8 +6,7 @@ on:
     branches: ["main"]
 
 env:
-  OUT_NAME: final_horror.mp4
-  MANIFEST_FILE: manifests/horreur.txt
+  OUT_NAME: "final_horror.mp4"
 
 jobs:
   build:
@@ -16,6 +15,8 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
+      MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
+      # --- Dropbox via refresh token (tes secrets existants) ---
       DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
@@ -24,12 +25,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install system deps
+      - name: Install system deps (ffmpeg)
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -38,65 +39,71 @@ jobs:
       - name: Install Python deps
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
+          python -V
+          pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # ---------- Story + Title + CTA ----------
-      - name: Generate story + title
+      - name: Check required secrets
+        run: |
+          set -euo pipefail
+          [ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_API_KEY:-}" ] || { echo "ELEVENLABS_API_KEY manquant"; exit 1; }
+          [ -n "${ELEVENLABS_VOICE_ID:-}" ] || { echo "ELEVENLABS_VOICE_ID manquant"; exit 1; }
+          [ -n "${MANIFEST_URL:-}" ] || { echo "MANIFEST_URL manquant"; exit 1; }
+          # Dropbox (refresh token) — si absent, on sautera juste l'étape upload
+          if [ -z "${DROPBOX_APP_KEY:-}" ] || [ -z "${DROPBOX_APP_SECRET:-}" ] || [ -z "${DROPBOX_REFRESH_TOKEN:-}" ]; then
+            echo "⚠️  Secrets Dropbox incomplets — l'étape Dropbox sera ignorée."
+            echo "DROPBOX_OK=0" >> $GITHUB_ENV
+          else
+            echo "DROPBOX_OK=1" >> $GITHUB_ENV
+          fi
+
+      - name: Generate story (GPT)
         run: |
           set -euo pipefail
           mkdir -p story
-          python scripts/generate_story.py \
-            --model gpt-4o \
-            --temperature 1 \
-            --system "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire." \
-            --user "Écris une histoire TikTok immersive (≈180-200 mots). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes." \
-            --out story/story.txt \
-            --title-out story/title.txt
-          echo "Abonne-toi pour découvrir l’horreur qui se cache dans l’ombre." > story/cta.txt
-          test -s story/story.txt
-          test -s story/title.txt
-          test -s story/cta.txt
+          python scripts/generate_story.py
+          test -s story/story.txt || { echo "story/story.txt manquant/vide"; exit 1; }
+          test -s story/title.txt || { echo "story/title.txt manquant/vide"; exit 1; }
 
-      - name: TTS (title -> 2s gap -> story -> CTA)
+      - name: Synthesize voice (ElevenLabs)
         run: |
           set -euo pipefail
           mkdir -p audio
-          python scripts/voice_elevenlabs.py \
-            --transcript story/story.txt \
-            --title story/title.txt \
-            --cta story/cta.txt \
-            --gap 2.0 \
-            --out audio/voice.wav
-          test -s audio/voice.wav
-          test -s audio/timeline.json || (echo "timeline.json manquant" && exit 1)
+          python scripts/voice_elevenlabs.py --transcript story/story.txt --out audio/voice.wav
+          test -s audio/voice.wav || { echo "audio/voice.wav manquant/vide"; exit 1; }
 
-      # ---------- Clips ----------
-      - name: Select & merge clips from manifest
+      - name: Select & merge clips (match audio length)
         run: |
           set -euo pipefail
           mkdir -p selected_media
-          test -s "${MANIFEST_FILE}"
           python scripts/select_and_merge.py \
-            --manifest "${MANIFEST_FILE}" \
+            --manifest manifests/horreur.txt \
             --audio audio/voice.wav \
             --out selected_media/merged.mp4
-          test -s selected_media/merged.mp4
+          test -s selected_media/merged.mp4 || { echo "selected_media/merged.mp4 manquant/vide"; exit 1; }
 
-      # ---------- Subtitles (ASS) ----------
-      - name: Build ASS subtitles (offset by title+gap)
+      - name: Build ASS subtitles
         run: |
           set -euo pipefail
           mkdir -p subs
           python scripts/build_ass.py \
             --transcript story/story.txt \
             --audio audio/voice.wav \
-            --timeline audio/timeline.json \
-            --out subs/captions.ass
-          test -s subs/captions.ass
+            --out subs/captions.ass \
+            --max-words 4 \
+            --max-lines 2 \
+            --align 5 \
+            --size 60 \
+            --colour "&H00FFFF00" \
+            --outline-colour "&H00000000" \
+            --outline 3 \
+            --shadow 2 \
+            --marginv 200
+          test -s subs/captions.ass || { echo "subs/captions.ass manquant/vide"; exit 1; }
+          grep -i '^Dialogue:' subs/captions.ass >/dev/null || { echo "Aucun Dialogue: dans subs/captions.ass"; exit 2; }
 
-      # ---------- Render final ----------
-      - name: Render final (overlays title & CTA)
+      - name: Render final video (effects + subtitles, cut to audio)
         run: |
           set -euo pipefail
           mkdir -p final_video
@@ -104,32 +111,25 @@ jobs:
             --video selected_media/merged.mp4 \
             --audio audio/voice.wav \
             --subs subs/captions.ass \
-            --title-file story/title.txt \
-            --cta-file story/cta.txt \
-            --timeline audio/timeline.json \
             --output "final_video/${OUT_NAME}"
-          test -s "final_video/${OUT_NAME}"
+          test -s "final_video/${OUT_NAME}" || { echo "final_video/${OUT_NAME} manquant/vide"; exit 1; }
 
-      - name: Upload artifacts
+      - name: Upload artifacts (final + subs)
         uses: actions/upload-artifact@v4
         with:
-          name: build_outputs
+          name: final_outputs
           path: |
-            story/
-            audio/
-            subs/
-            selected_media/
             final_video/
+            subs/captions.ass
 
-      # ---------- Dropbox ----------
-      - name: Upload to Dropbox
+      - name: Upload to Dropbox (refresh-token)
+        if: env.DROPBOX_OK == '1'
         run: |
           set -euo pipefail
-          : "${DROPBOX_APP_KEY:?missing}"
-          : "${DROPBOX_APP_SECRET:?missing}"
-          : "${DROPBOX_REFRESH_TOKEN:?missing}"
-          python scripts/dropbox_upload.py \
-            --file "final_video/${OUT_NAME}" \
-            --remote-dir "/horror" \
-            --out-link final_video/dropbox_link.txt
-          test -s final_video/dropbox_link.txt || true
+          python scripts/dropbox_upload.py --file "final_video/${OUT_NAME}" || {
+            echo "❌ Échec Dropbox (refresh token) — vérifier clés/permissions"; exit 1;
+          }
+        env:
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
