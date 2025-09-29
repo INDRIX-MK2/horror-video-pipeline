@@ -1,167 +1,120 @@
 #!/usr/bin/env python3
-import argparse, subprocess, pathlib, sys, shlex, re
+import argparse, pathlib, sys, json, subprocess, shlex
 
-FONTFILE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # dispo sur ubuntu-latest
-
-def ffprobe_duration(path: pathlib.Path) -> float:
-    try:
-        out = subprocess.check_output([
-            "ffprobe","-v","error",
-            "-show_entries","format=duration",
-            "-of","default=nk=1:nw=1",
-            str(path)
-        ]).decode("utf-8","ignore").strip()
-        return float(out)
-    except Exception:
-        return 0.0
-
-def read_title(story_path: pathlib.Path, title_path: pathlib.Path) -> str:
-    if title_path.exists() and title_path.stat().st_size:
-        return title_path.read_text(encoding="utf-8").strip()
-    # fallback: fabriquer un titre court depuis la 1ère phrase du script
-    if story_path.exists() and story_path.stat().st_size:
-        txt = story_path.read_text(encoding="utf-8", errors="ignore").strip()
-        # prendre la 1re phrase
-        m = re.split(r"[.!?]\s+", txt)
-        head = (m[0] if m else txt).strip()
-        # 6–10 mots max
-        words = head.split()
-        short = " ".join(words[:10])
-        return short if short else "Histoire d'horreur"
-    return "Histoire d'horreur"
-
-def esc_drawtext_text(s: str) -> str:
-    # Échappements sûrs pour drawtext
-    s = s.replace("\\", "\\\\")
-    s = s.replace(":", r"\:")
-    s = s.replace("'", r"\'")
-    return s
-
-def esc_filter_arg_path(p: str) -> str:
-    # Pour subtitles=filename=... dans le filtergraph
-    # (éviter espaces/comma/colon)
-    s = p.replace("\\", "\\\\")
-    s = s.replace(":", r"\:")
-    s = s.replace(",", r"\,")
-    return s
+def load_timeline(p: pathlib.Path):
+    if p and p.exists() and p.stat().st_size:
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
 
 def main():
-    ap = argparse.ArgumentParser(description="Assemble final TikTok horror video with intro/outro and ASS subtitles")
-    ap.add_argument("--video", required=True, help="Chemin de la vidéo fusionnée (merged.mp4)")
-    ap.add_argument("--audio", required=True, help="Chemin de l'audio narratif (voice.wav)")
-    ap.add_argument("--subs",  required=True, help="Chemin des sous-titres .ass")
-    ap.add_argument("--output", required=True, help="Fichier de sortie final")
-    # facultatif: story/title pour l’intro
-    ap.add_argument("--story", default="story/story.txt")
-    ap.add_argument("--title", default="story/title.txt")
-    # timings overlays
-    ap.add_argument("--intro_dur", type=float, default=1.8)
-    ap.add_argument("--outro_dur", type=float, default=2.2)
-    # CTA texte (modif facile si besoin)
-    ap.add_argument("--cta_text", default="Tu as aimé ? Abonne-toi et partage !")
+    ap = argparse.ArgumentParser(description="Render final video with title first + CTA at end")
+    ap.add_argument("--video", required=True)
+    ap.add_argument("--audio", required=True)
+    ap.add_argument("--subs", required=True)             # .ass
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--title-file", required=True)       # story/title.txt
+    ap.add_argument("--cta-file", required=True)         # story/cta.txt
+    ap.add_argument("--timeline", default="audio/timeline.json")
     args = ap.parse_args()
 
-    video = pathlib.Path(args.video)
-    audio = pathlib.Path(args.audio)
-    subs  = pathlib.Path(args.subs)
-    output = pathlib.Path(args.output)
-    story = pathlib.Path(args.story)
-    title_file = pathlib.Path(args.title)
+    v = pathlib.Path(args.video)
+    a = pathlib.Path(args.audio)
+    s = pathlib.Path(args.subs)
+    out = pathlib.Path(args.output)
+    tfile = pathlib.Path(args.title_file)
+    cfile = pathlib.Path(args.cta_file)
+    tline = pathlib.Path(args.timeline)
 
-    if not video.exists():
-        print(f"[render_final] ERREUR: vidéo manquante -> {video}", file=sys.stderr); sys.exit(1)
-    if not audio.exists():
-        print(f"[render_final] ERREUR: audio manquant -> {audio}", file=sys.stderr); sys.exit(1)
-    if not subs.exists():
-        print(f"[render_final] ERREUR: sous-titres manquants -> {subs}", file=sys.stderr); sys.exit(1)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    for p in [v,a,s,tfile,cfile]:
+        if not p.exists() or not p.stat().st_size:
+            print(f"[render_final] ERREUR: manquant => {p}", file=sys.stderr)
+            sys.exit(1)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    vdur = ffprobe_duration(video)
-    if vdur <= 0:
-        print("[render_final] ERREUR: durée vidéo inconnue", file=sys.stderr); sys.exit(1)
+    tl = load_timeline(tline)
+    title_d = float(tl.get("title", 0.0))
+    gap_d   = float(tl.get("gap", 0.0))
+    cta_d   = float(tl.get("cta", 4.0))
+    total_d = float(tl.get("total", 0.0))
 
-    # Lire le titre (depuis title.txt ou fallback)
-    title_txt = read_title(story, title_file)
-    cta_txt = args.cta_text
+    # Si pas de timeline, on met des valeurs par défaut safe
+    if total_d <= 0:
+        # Probe durée audio => pour CTA approx = 4s fin
+        try:
+            outd = subprocess.check_output([
+                "ffprobe","-v","error","-show_entries","format=duration",
+                "-of","default=nk=1:nw=1", str(a)
+            ]).decode().strip()
+            total_d = float(outd)
+        except Exception:
+            total_d = 60.0
+    if cta_d <= 0: cta_d = 4.0
+    cta_start = max(0.0, total_d - cta_d)
 
-    # Échapper pour drawtext
-    title_txt_esc = esc_drawtext_text(title_txt)
-    cta_txt_esc   = esc_drawtext_text(cta_txt)
+    # Font DejaVu dispo sur ubuntu-latest
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-    # Timings intro/outro (pas de padding noir — overlays par-dessus la vidéo existante)
-    intro_d = max(0.0, min(args.intro_dur, max(0.0, vdur - 0.1)))  # pas dépasser vdur
-    outro_d = max(0.0, min(args.outro_dur, max(0.0, vdur - 0.1)))
-    outro_st = max(0.0, vdur - outro_d)
-
-    # Fades globaux déjà chiffrés (pas d'expressions 'duration-...')
-    fade_in_d  = 0.6
-    fade_out_d = 0.6
-    fade_out_st = max(0.0, vdur - fade_out_d)
-
-    # Préprocess + léger "shake" via rotate sinus
+    # Filters:
+    # - v0: préparation vidéo (format, léger mouvement, etc.)
+    # - v1: sous-titres .ass
+    # - v2: titre en haut-centre pendant [0, title_d]
+    # - v3: CTA en bas-centre pendant [cta_start, total]
     base = (
-        f"[0:v]setpts=PTS-STARTPTS,"
-        f"scale=1200:2133:force_original_aspect_ratio=increase,"
-        f"rotate=0.005*sin(2*PI*t):fillcolor=black,"
-        f"crop=1080:1920,"
-        f"unsharp=5:5:0.5:5:5:0.0,"
-        f"eq=contrast=1.05:brightness=0.02,"
-        f"fps=30,"
-        f"fade=t=in:st=0:d={fade_in_d},"
-        f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d}[base];"
+        "setpts=PTS-STARTPTS,"
+        "scale=1200:2133:force_original_aspect_ratio=increase,"
+        "rotate=0.005*sin(2*PI*t):fillcolor=black,"
+        "crop=1080:1920,"
+        "unsharp=5:5:0.5:5:5:0.0,"
+        "eq=contrast=1.05:brightness=0.02,"
+        "fps=30"
     )
 
-    # Intro title en haut (éviter le centre où tu places tes sous-titres)
-    intro = (
-        f"[base]drawtext=fontfile={FONTFILE}:"
-        f"text='{title_txt_esc}':"
-        f"x=(w-text_w)/2:y=120:"
-        f"fontsize=72:fontcolor=white:"
-        f"box=1:boxcolor=black@0.55:boxborderw=24:"
-        f"enable='between(t,0,{intro_d:.2f})'[t1];"
+    title_enable = f"between(t,0,{title_d:.3f})" if title_d > 0 else "lt(t,0)"
+    cta_enable   = f"gte(t,{cta_start:.3f})"
+
+    sub_filter = f"subtitles={shlex.quote(str(s))}"
+    draw_title = (
+        f"drawtext=fontfile={shlex.quote(font)}:"
+        f"textfile={shlex.quote(str(tfile))}:"
+        f"enable='{title_enable}':"
+        "x=(w-text_w)/2:y=h*0.18:fontsize=72:"
+        "fontcolor=white:borderw=6:bordercolor=black@0.7"
+    )
+    draw_cta = (
+        f"drawtext=fontfile={shlex.quote(font)}:"
+        f"textfile={shlex.quote(str(cfile))}:"
+        f"enable='{cta_enable}':"
+        "x=(w-text_w)/2:y=h*0.83:fontsize=56:"
+        "fontcolor=white:borderw=6:bordercolor=black@0.7"
     )
 
-    # Outro CTA proche du haut aussi (pour éviter collision avec subs centrés)
-    outro = (
-        f"[t1]drawtext=fontfile={FONTFILE}:"
-        f"text='{cta_txt_esc}':"
-        f"x=(w-text_w)/2:y=220:"
-        f"fontsize=64:fontcolor=white:"
-        f"box=1:boxcolor=black@0.55:boxborderw=22:"
-        f"enable='between(t,{outro_st:.2f},{vdur:.2f})'[v0];"
+    fcomplex = (
+        f"[0:v]{base}[v0];"
+        f"[v0]{sub_filter}[v1];"
+        f"[v1]{draw_title}[v2];"
+        f"[v2]{draw_cta}[v]"
     )
-
-    # Audio passthrough (juste alignement PTS)
-    audiof = "[1:a]asetpts=PTS-STARTPTS[a0];"
-
-    # Sous-titres (chemin absolu + échappement filtre)
-    subs_abs = esc_filter_arg_path(str(subs.resolve()))
-    subsf = f"[v0]subtitles=filename={subs_abs}[v]"
-
-    filter_complex = base + intro + outro + audiof + subsf
 
     cmd = [
         "ffmpeg","-nostdin","-y",
-        "-i", str(video),
-        "-i", str(audio),
-        "-filter_complex", filter_complex,
-        "-map","[v]","-map","[a0]",
+        "-i", str(v),
+        "-i", str(a),
+        "-filter_complex", fcomplex,
+        "-map","[v]","-map","1:a:0",
         "-c:v","libx264","-preset","medium","-crf","18","-pix_fmt","yuv420p",
         "-c:a","aac","-b:a","192k",
         "-movflags","+faststart",
         "-shortest",
-        str(output)
+        str(out)
     ]
 
     print("[render_final] Exécution FFmpeg…")
     print(" ".join(shlex.quote(c) for c in cmd))
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[render_final] ERREUR FFmpeg: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[render_final] Vidéo finale générée -> {output}")
+    subprocess.run(cmd, check=True)
+    print(f"[render_final] OK -> {out}")
 
 if __name__ == "__main__":
     main()

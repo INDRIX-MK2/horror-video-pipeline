@@ -1,4 +1,4 @@
-﻿name: Horror TikTok Builder (no-heredoc, full)
+﻿name: Horror TikTok Builder (no-heredoc, title-first + CTA)
 
 on:
   workflow_dispatch:
@@ -21,10 +21,10 @@ jobs:
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.12
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -41,8 +41,8 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # ===================== STORY =====================
-      - name: Generate story (gpt-4o, temp=1)
+      # ---------- Story + Title + CTA ----------
+      - name: Generate story + title
         run: |
           set -euo pipefail
           mkdir -p story
@@ -53,31 +53,26 @@ jobs:
             --user "Écris une histoire TikTok immersive (≈180-200 mots). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes." \
             --out story/story.txt \
             --title-out story/title.txt
+          echo "Abonne-toi pour découvrir l’horreur qui se cache dans l’ombre." > story/cta.txt
           test -s story/story.txt
+          test -s story/title.txt
+          test -s story/cta.txt
 
-      - name: Show story length
-        run: |
-          set -euo pipefail
-          wc -w story/story.txt || true
-          if [ -s story/title.txt ]; then echo "Title: $(cat story/title.txt)"; fi
-
-      # ====================== TTS ======================
-      - name: Synthesize voice (ElevenLabs)
+      - name: TTS (title -> 2s gap -> story -> CTA)
         run: |
           set -euo pipefail
           mkdir -p audio
           python scripts/voice_elevenlabs.py \
             --transcript story/story.txt \
+            --title story/title.txt \
+            --cta story/cta.txt \
+            --gap 2.0 \
             --out audio/voice.wav
           test -s audio/voice.wav
+          test -s audio/timeline.json || (echo "timeline.json manquant" && exit 1)
 
-      - name: Probe audio duration
-        run: |
-          set -euo pipefail
-          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav | tr -d '\r' || true
-
-      # ============== SELECT & MERGE CLIPS =============
-      - name: Select & merge clips from manifest (absolute paths)
+      # ---------- Clips ----------
+      - name: Select & merge clips from manifest
         run: |
           set -euo pipefail
           mkdir -p selected_media
@@ -88,25 +83,20 @@ jobs:
             --out selected_media/merged.mp4
           test -s selected_media/merged.mp4
 
-      - name: Probe merged video
-        run: |
-          set -euo pipefail
-          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 selected_media/merged.mp4 || true
-
-      # ================== SUBTITLES (ASS) ==============
-      - name: Build ASS subtitles
+      # ---------- Subtitles (ASS) ----------
+      - name: Build ASS subtitles (offset by title+gap)
         run: |
           set -euo pipefail
           mkdir -p subs
           python scripts/build_ass.py \
             --transcript story/story.txt \
             --audio audio/voice.wav \
+            --timeline audio/timeline.json \
             --out subs/captions.ass
           test -s subs/captions.ass
-          head -n 25 subs/captions.ass || true
 
-      # ===================== RENDER =====================
-      - name: Render final video (effects + subs, cut to audio)
+      # ---------- Render final ----------
+      - name: Render final (overlays title & CTA)
         run: |
           set -euo pipefail
           mkdir -p final_video
@@ -114,16 +104,12 @@ jobs:
             --video selected_media/merged.mp4 \
             --audio audio/voice.wav \
             --subs subs/captions.ass \
+            --title-file story/title.txt \
+            --cta-file story/cta.txt \
+            --timeline audio/timeline.json \
             --output "final_video/${OUT_NAME}"
           test -s "final_video/${OUT_NAME}"
 
-      - name: Show final info
-        run: |
-          set -euo pipefail
-          du -h "final_video/${OUT_NAME}" || true
-          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "final_video/${OUT_NAME}" || true
-
-      # =================== ARTIFACTS ====================
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -135,8 +121,8 @@ jobs:
             selected_media/
             final_video/
 
-      # =================== DROPBOX ======================
-      - name: Upload to Dropbox (refresh token auto)
+      # ---------- Dropbox ----------
+      - name: Upload to Dropbox
         run: |
           set -euo pipefail
           : "${DROPBOX_APP_KEY:?missing}"
