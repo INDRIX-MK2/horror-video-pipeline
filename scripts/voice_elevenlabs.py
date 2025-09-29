@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, os, sys, json, pathlib, subprocess, shlex, time
+import argparse, os, sys, json, pathlib, subprocess
 from urllib import request
 from urllib.error import HTTPError
 
@@ -58,18 +58,24 @@ def to_wav_441k_stereo(inp: pathlib.Path, out_wav: pathlib.Path):
 def gen_silence_wav(out_wav: pathlib.Path, seconds: float):
     subprocess.run([
         "ffmpeg","-nostdin","-y",
-        "-f","lavfi","-i",f"anullsrc=r=44100:cl=stereo",
+        "-f","lavfi","-i","anullsrc=r=44100:cl=stereo",
         "-t", f"{seconds:.3f}",
         "-ar","44100","-ac","2","-c:a","pcm_s16le",
         str(out_wav)
     ], check=True)
 
 def concat_wavs(wavs, out_wav: pathlib.Path):
-    # Concat demuxer => besoin d’un file list
+    """
+    Ecrit un fichier-liste avec chemins ABSOLUS et quotés:
+      file '/abs/path1.wav'
+      file '/abs/path2.wav'
+    Ainsi, pas d'ambiguïté de répertoire.
+    """
     flist = out_wav.with_suffix(".txt")
     with flist.open("w", encoding="utf-8") as f:
         for w in wavs:
-            f.write(f"file {w.as_posix()}\n")
+            abs_p = w.resolve()
+            f.write(f"file '{abs_p.as_posix()}'\n")
     subprocess.run([
         "ffmpeg","-nostdin","-y","-f","concat","-safe","0",
         "-i", str(flist),
@@ -114,7 +120,7 @@ def main():
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    work = out.parent
+    work = out.parent.resolve()   # ex: /home/runner/.../audio
     mp3_title = work/"title.mp3"
     mp3_story = work/"story.mp3"
     mp3_cta   = work/"cta.mp3"
@@ -123,21 +129,24 @@ def main():
     wav_cta   = work/"cta.wav"
     wav_gap   = work/"gap.wav"
 
-    # TTS
-    if title_txt:
+    # TTS -> mp3 -> wav
+    has_title = bool(title_txt)
+    if has_title:
         tts_to_mp3(title_txt, voice_id, mp3_title, api_key)
         to_wav_441k_stereo(mp3_title, wav_title)
+
     tts_to_mp3(story, voice_id, mp3_story, api_key)
     to_wav_441k_stereo(mp3_story, wav_story)
+
     tts_to_mp3(cta_txt, voice_id, mp3_cta, api_key)
     to_wav_441k_stereo(mp3_cta, wav_cta)
 
-    if args.gap > 0.0:
+    if has_title and args.gap > 0.0:
         gen_silence_wav(wav_gap, args.gap)
 
-    # Concat
+    # Concat chain
     chain = []
-    if title_txt:
+    if has_title:
         chain.append(wav_title)
         if args.gap > 0.0:
             chain.append(wav_gap)
@@ -146,9 +155,9 @@ def main():
 
     concat_wavs(chain, out)
 
-    # Timeline
-    title_d = ffprobe_duration(wav_title) if title_txt else 0.0
-    gap_d   = args.gap if title_txt else 0.0
+    # Timeline JSON
+    title_d = ffprobe_duration(wav_title) if has_title else 0.0
+    gap_d   = args.gap if has_title else 0.0
     story_d = ffprobe_duration(wav_story)
     cta_d   = ffprobe_duration(wav_cta)
     total   = ffprobe_duration(out)
