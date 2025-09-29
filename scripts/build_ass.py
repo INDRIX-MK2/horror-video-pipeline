@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys, argparse, pathlib, subprocess, re, math, json
+from typing import Tuple, Optional, Any, List
 
 # ----------------------------
 # Arguments / options
@@ -20,7 +21,7 @@ ap.add_argument("--cta-text", dest="cta_text", default="story/cta.txt", help="Fi
 ap.add_argument("--cta-audio", dest="cta_audio", default="audio/cta.wav", help="Audio du CTA")
 ap.add_argument("--gap-before-cta", type=float, default=1.0, help="Pause entre fin histoire et début CTA (secondes)")
 
-# NEW: timeline JSON optionnel (prend la priorité sur la sonde audio)
+# timeline JSON optionnel (prend la priorité sur la sonde audio)
 ap.add_argument("--timeline", help="JSON avec timings. Ex: {'title':{'start':0,'end':2}, 'story':{'start':2,'end':92}, 'cta':{'start':93,'end':98}}")
 
 # Styles
@@ -59,7 +60,7 @@ def ffprobe_duration(p: pathlib.Path) -> float:
     try:
         out = subprocess.check_output([
             "ffprobe","-v","error","-show_entries","format=duration",
-            "-of","default=nk=1:nw=1", str(p)
+            "of=default=nk=1:nw=1".replace("of=","-of="), str(p)
         ]).decode("utf-8","ignore").strip()
         return float(out)
     except Exception:
@@ -78,7 +79,7 @@ def clean_text(s: str) -> str:
     s = re.sub(r"\([^)]+\)", "", s)
     return re.sub(r"\s+", " ", s).strip()
 
-def wrap_by_words(text: str, max_words: int) -> list[str]:
+def wrap_by_words(text: str, max_words: int) -> List[str]:
     words = text.split()
     out, buf = [], []
     for w in words:
@@ -90,18 +91,19 @@ def wrap_by_words(text: str, max_words: int) -> list[str]:
         out.append(" ".join(buf))
     return out
 
-def split_sentences(txt: str) -> list[str]:
+def split_sentences(txt: str) -> List[str]:
     parts = re.split(r'(?<=[\.\!\?…])\s+', txt)
     return [p.strip() for p in parts if p.strip()]
 
-def make_story_chunks(text: str, max_words_per_line: int, max_lines: int) -> list[str]:
+def make_story_chunks(text: str, max_words_per_line: int, max_lines: int) -> List[str]:
     sentences = split_sentences(text)
     chunks = []
     for sent in sentences:
         lines = wrap_by_words(sent, max_words_per_line)
         for i in range(0, len(lines), max_lines):
             group = lines[i:i+max_lines]
-            chunks.append(r"\N".join(group))
+            # Utiliser \N pour forcer la nouvelle ligne ASS, sans échappement résiduel
+            chunks.append("\\N".join(group))
     if not chunks:
         chunks = [text]
     return chunks
@@ -124,7 +126,7 @@ opath = pathlib.Path(args.out)
 opath.parent.mkdir(parents=True, exist_ok=True)
 
 timeline_path = pathlib.Path(args.timeline) if args.timeline else None
-timeline = None
+timeline: Optional[dict] = None
 if timeline_path and exists_nonempty(timeline_path):
     try:
         timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
@@ -135,26 +137,48 @@ if timeline_path and exists_nonempty(timeline_path):
 # ----------------------------
 # Durées & placement temporel
 # ----------------------------
-def seg_from_timeline(name: str, prev_end: float, default_gap: float) -> tuple[float,float,bool]:
-    """Retourne (start,end,found) pour une section à partir du timeline JSON.
-       Accepte start/end, start/duration, ou duration (avec start implicite = prev_end+gap)."""
+def parse_tl_section(val: Any, prev_end: float, default_gap: float) -> Tuple[float,float,bool]:
+    """
+    Accepte:
+      - dict: {start,end} | {start,duration} | {duration}
+      - nombre: duration
+      - liste/tuple de 2 nombres: [start, end] ou [start, duration] (si end<start => duration)
+    Retourne (start, end, found).
+    """
+    start: Optional[float] = None
+    end:   Optional[float] = None
+    dur:   Optional[float] = None
+
+    if isinstance(val, dict):
+        if "start" in val: start = float(val["start"])
+        if "end"   in val: end   = float(val["end"])
+        if "duration" in val: dur = float(val["duration"])
+    elif isinstance(val, (int, float)):
+        dur = float(val)
+    elif isinstance(val, (list, tuple)) and len(val) == 2 and all(isinstance(x, (int,float)) for x in val):
+        a, b = float(val[0]), float(val[1])
+        # si b > a on considère [start,end], sinon [start,duration]
+        if b > a:
+            start, end = a, b
+        else:
+            start, dur = a, b
+    else:
+        return (0.0, 0.0, False)
+
+    if start is None:
+        start = prev_end + (default_gap if default_gap is not None else 0.0)
+    if end is None:
+        if dur is not None:
+            end = start + dur
+        else:
+            return (0.0, 0.0, False)
+
+    return (float(start), float(end), True)
+
+def seg_from_timeline(name: str, prev_end: float, default_gap: float) -> Tuple[float,float,bool]:
     if not timeline or name not in timeline:
         return (0.0, 0.0, False)
-    obj = timeline[name] or {}
-    st  = obj.get("start", None)
-    en  = obj.get("end",   None)
-    dur = obj.get("duration", None)
-    if st is None and dur is None and en is None:
-        return (0.0, 0.0, False)
-    if st is None:
-        st = prev_end + (default_gap if default_gap is not None else 0.0)
-    if en is None:
-        if dur is not None:
-            en = st + float(dur)
-        else:
-            # si end manquant et pas de duration, section invalide
-            return (0.0, 0.0, False)
-    return (float(st), float(en), True)
+    return parse_tl_section(timeline[name], prev_end, default_gap)
 
 have_segments = False
 t0_title=t1_title=t0_story=t1_story=t0_cta=t1_cta=0.0
@@ -162,7 +186,6 @@ dur_title=dur_story=dur_cta=0.0
 total_audio=0.0
 
 if timeline:
-    # Priorité à la timeline
     # Titre
     t0_title, t1_title, f_title = seg_from_timeline("title", 0.0, 0.0)
     dur_title = max(0.0, t1_title - t0_title) if f_title else 0.0
@@ -245,12 +268,12 @@ if story_chunks and (t1_story > t0_story):
 
 # Titre avant l’histoire
 if (t1_title > t0_title) and title_lines:
-    title_text_joined = r"\N".join(title_lines)
+    title_text_joined = "\\N".join(title_lines)
     events.insert(0, ("Title", t0_title, t1_title, title_text_joined))
 
 # CTA après la pause
 if (t1_cta > t0_cta) and cta_lines:
-    cta_text_joined = r"\N".join(cta_lines)
+    cta_text_joined = "\\N".join(cta_lines)
     events.append(("CTA", t0_cta, t1_cta, cta_text_joined))
 
 # ----------------------------
