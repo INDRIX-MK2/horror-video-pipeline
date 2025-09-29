@@ -88,7 +88,7 @@ ap.add_argument("--story-audio", default="audio/story.wav")
 args = ap.parse_args()
 
 t_story = pathlib.Path(args.transcript).read_text(encoding="utf-8").strip()
-t_title = pathlib.Path(args.title-txt if hasattr(args, "title-text") else args.title_text)  # guard pylance
+t_title = pathlib.Path(args.title-text if hasattr(args, "title-text") else args.title_text)  # guard pylance
 # corrige l’accès (pylance n’aime pas “-”); on passe par __dict__
 t_title = pathlib.Path(args.__dict__["title_text"]).read_text(encoding="utf-8").strip()
 t_cta   = pathlib.Path(args.__dict__["cta_text"]).read_text(encoding="utf-8").strip()
