@@ -74,8 +74,7 @@ jobs:
       - name: Probe audio duration
         run: |
           set -euo pipefail
-          D=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav | tr -d '\r')
-          echo "Audio duration: $D"
+          ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 audio/voice.wav | tr -d '\r' || true
 
       # ============== SELECT & MERGE CLIPS =============
       - name: Select & merge clips from manifest (absolute paths)
@@ -137,7 +136,7 @@ jobs:
             final_video/
 
       # =================== DROPBOX ======================
-      - name: Upload to Dropbox (refresh token)
+      - name: Upload to Dropbox (refresh token auto)
         run: |
           set -euo pipefail
           : "${DROPBOX_APP_KEY:?missing}"
@@ -146,4 +145,5 @@ jobs:
           python scripts/dropbox_upload.py \
             --file "final_video/${OUT_NAME}" \
             --remote-dir "/horror" \
-            --use-refresh-token
+            --out-link final_video/dropbox_link.txt
+          test -s final_video/dropbox_link.txt || true
