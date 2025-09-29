@@ -23,7 +23,7 @@ ap.add_argument("--size", type=int, default=60, help="Taille de police (ex: 60)"
 ap.add_argument("--align", type=int, default=5, help="Alignment ASS (5 = centré bas)")
 ap.add_argument("--margin-v", type=int, default=200, help="Marge verticale (px)")
 ap.add_argument("--words-per-line", type=int, default=4, help="Mots max par ligne")
-ap.add_argument("--max-lines", type=int, default=2, help="Lignes max par sous-titre (2 ou 3)")
+ap.add_argument("--max-lines", type=int, default=3, help="Lignes max par sous-titre (2 ou 3)")
 ap.add_argument("--min-chunk", type=float, default=1.2, help="Durée min d’un sous-titre (s)")
 ap.add_argument("--primary-colour", default="&H0080FFF3", help="Couleur texte (BGRx, ex: jaune pâle)")
 ap.add_argument("--outline-colour", default="&H00000000", help="Couleur contour (noir)")
