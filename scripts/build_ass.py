@@ -16,7 +16,7 @@ ap.add_argument("--max-lines", type=int, default=3)
 ap.add_argument("--min-chunk", type=float, default=1.0)
 
 # >>> Anti-dérive (nouveaux paramètres)
-ap.add_argument("--lead", type=float, default=-0.15, help="avance globale (s, négatif = plus tôt)")
+ap.add_argument("--lead", type=float, default=-0, help="avance globale (s, négatif = plus tôt)")
 ap.add_argument("--speed", type=float, default=1.0, help="facteur de compression de durée (1.0 = inchangé)")
 # <<<
 
