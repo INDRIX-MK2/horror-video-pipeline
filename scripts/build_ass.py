@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Génère un .ASS (karaoké simple) à partir d'un transcript texte et d'un audio.
-- Découpe par phrases.
-- Force 2 lignes par sous-titre (modifiable via --max-lines).
-- Répartit la durée totale de l'audio proportionnellement au nombre de mots.
-- Style par défaut lisible en ambiance sombre (jaune pâle + contour noir).
-"""
-
 import sys, argparse, pathlib, subprocess, re
 
-# ----------------------------
-# Arguments
-# ----------------------------
 ap = argparse.ArgumentParser()
-ap.add_argument("--transcript", required=True, help="Chemin du texte (ex: story/story.txt)")
-ap.add_argument("--audio", required=True, help="Chemin du WAV/MP3 (ex: audio/voice.wav)")
-ap.add_argument("--out", default="subs/captions.ass", help="Chemin .ass de sortie")
-ap.add_argument("--font", default="Arial", help="Police ASS")
-ap.add_argument("--size", type=int, default=80, help="Taille de police (ex: 60)")
-ap.add_argument("--align", type=int, default=5, help="Alignment ASS (5 = centré bas)")
-ap.add_argument("--margin-v", type=int, default=200, help="Marge verticale (px)")
-ap.add_argument("--words-per-line", type=int, default=4, help="Mots max par ligne")
-ap.add_argument("--max-lines", type=int, default=3, help="Lignes max par sous-titre (2 ou 3)")
-ap.add_argument("--min-chunk", type=float, default=1.2, help="Durée min d’un sous-titre (s)")
-ap.add_argument("--primary-colour", default="&H0080FFF3", help="Couleur texte (BGRx, ex: jaune pâle)")
-ap.add_argument("--outline-colour", default="&H00000000", help="Couleur contour (noir)")
-ap.add_argument("--back-colour", default="&H64000000", help="Fond (noir alpha)")
-ap.add_argument("--outline", type=int, default=3, help="Épaisseur contour")
-ap.add_argument("--shadow", type=int, default=2, help="Ombre")
+ap.add_argument("--transcript", required=True)
+ap.add_argument("--audio", required=True)
+ap.add_argument("--out", default="subs/captions.ass")
+ap.add_argument("--font", default="Arial")
+ap.add_argument("--size", type=int, default=80)
+ap.add_argument("--align", type=int, default=5)
+ap.add_argument("--margin-v", type=int, default=200)
+ap.add_argument("--words-per-line", type=int, default=4)
+ap.add_argument("--max-lines", type=int, default=3)
+ap.add_argument("--min-chunk", type=float, default=1.0)
+
+# >>> Anti-dérive (nouveaux paramètres)
+ap.add_argument("--lead", type=float, default=-0.15, help="avance globale (s, négatif = plus tôt)")
+ap.add_argument("--speed", type=float, default=0.98, help="facteur de compression de durée (1.0 = inchangé)")
+# <<<
+
+ap.add_argument("--primary-colour", default="&H0080FFF3")
+ap.add_argument("--outline-colour", default="&H00000000")
+ap.add_argument("--back-colour", default="&H64000000")
+ap.add_argument("--outline", type=int, default=3)
+ap.add_argument("--shadow", type=int, default=2)
 args = ap.parse_args()
 
 tpath = pathlib.Path(args.transcript)
@@ -42,9 +37,6 @@ if not tpath.exists() or not tpath.stat().st_size:
 if not apath.exists() or not apath.stat().st_size:
     print("Audio introuvable/vide", file=sys.stderr); sys.exit(1)
 
-# ----------------------------
-# Utilitaires
-# ----------------------------
 def ffprobe_duration(p: pathlib.Path) -> float:
     try:
         out = subprocess.check_output([
@@ -58,13 +50,10 @@ def ffprobe_duration(p: pathlib.Path) -> float:
 
 def to_ass_ts(sec: float) -> str:
     if sec < 0: sec = 0
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = int(sec % 60)
+    h = int(sec // 3600); m = int((sec % 3600) // 60); s = int(sec % 60)
     cs = int(round((sec - int(sec)) * 100))
     if cs >= 100:
-        s += 1
-        cs -= 100
+        s += 1; cs -= 100
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 RE_STAGE = re.compile(
@@ -93,15 +82,13 @@ def split_sentences(text: str):
     return out
 
 def ass_escape(s: str) -> str:
-    # Échapper le contenu UTILISATEUR (pas les \N)
     s = s.replace("\\", r"\\")
     s = s.replace("{", r"\{").replace("}", r"\}")
     return s
 
-def wrap_to_lines(words, max_lines=2, words_per_line=4):
+def wrap_to_lines(words, max_lines=3, words_per_line=4):
     if max_lines < 1: max_lines = 1
-    chunks = []
-    buf = []
+    chunks, buf = [], []
     for w in words:
         buf.append(w)
         if len(buf) >= words_per_line:
@@ -110,7 +97,6 @@ def wrap_to_lines(words, max_lines=2, words_per_line=4):
         chunks.append(" ".join(buf))
     if not chunks:
         return [""]
-
     while len(chunks) > max_lines:
         lengths = [len(c.split()) for c in chunks]
         i = lengths.index(min(lengths))
@@ -123,7 +109,7 @@ def wrap_to_lines(words, max_lines=2, words_per_line=4):
     return chunks
 
 # ----------------------------
-# Lecture et préparation texte
+# Lecture + découpe
 # ----------------------------
 raw = tpath.read_text(encoding="utf-8", errors="ignore")
 lines = [clean_text(ln) for ln in raw.splitlines() if clean_text(ln)]
@@ -134,41 +120,64 @@ items = []
 total_words = 0
 for sent in sentences:
     w = sent.split()
-    if not w:
-        continue
+    if not w: continue
     total_words += len(w)
-    lines_wrapped = wrap_to_lines(w, max_lines=args.max_lines, words_per_line=args.words_per_line)
-    items.append((w, lines_wrapped))
+    wrapped = wrap_to_lines(w, max_lines=args.max_lines, words_per_line=args.words_per_line)
+    items.append((w, wrapped))
 
 if not items:
-    print("Aucune phrase après nettoyage.", file=sys.stderr)
-    sys.exit(1)
+    print("Aucune phrase après nettoyage.", file=sys.stderr); sys.exit(1)
+
+audio_dur = ffprobe_duration(apath)
 
 # ----------------------------
-# Timing proportionnel à l’audio
+# Durées “brutes” proportionnelles
 # ----------------------------
-audio_dur = ffprobe_duration(apath)
-t = 0.0
 events = []
-for w, lines_wrapped in items:
+t = 0.0
+for w, wrapped in items:
     share = (len(w) / total_words) * audio_dur
     dur = max(args.min_chunk, share)
-    end = min(audio_dur, t + dur)
-    if end - t < 0.3 and end < audio_dur:
-        end = min(audio_dur, t + 0.3)
-
-    # IMPORTANT : on échappe CHAQUE LIGNE, puis on les joint avec \N (non échappé)
-    escaped_lines = [ass_escape(line.strip()) for line in lines_wrapped if line.strip()]
+    s = t
+    e = min(audio_dur, s + dur)
+    t = e
+    # Prépare le texte (chaque ligne échappée, séparateur \N non échappé)
+    escaped_lines = [ass_escape(line.strip()) for line in wrapped if line.strip()]
     text = r"\N".join(escaped_lines)
-
-    events.append((t, end, text))
-    t = end
+    events.append([s, e, text])
 
 if events and events[-1][1] > audio_dur:
-    last = list(events[-1]); last[1] = audio_dur; events[-1] = tuple(last)
+    events[-1][1] = audio_dur
 
 # ----------------------------
-# Écriture du ASS
+# Anti-dérive : avance + compression
+# Recalage autour du centre de chaque sous-titre.
+# ----------------------------
+lead = float(args.lead)
+speed = float(args.speed)
+MIN_GAP = 0.02  # 20 ms pour éviter chevauchement
+
+adj = []
+prev_end = 0.0
+for s, e, txt in events:
+    dur = max(0.01, e - s)
+    mid = (s + e) / 2.0
+    new_dur = max(args.min_chunk, dur * speed)
+    ns = mid - new_dur / 2.0 + lead
+    ne = ns + new_dur
+
+    # Empêcher chevauchements et bornes
+    if ns < prev_end + MIN_GAP:
+        ns = prev_end + MIN_GAP
+        ne = ns + new_dur
+    if ne > audio_dur:
+        ne = audio_dur
+        ns = max(prev_end + MIN_GAP, ne - new_dur)
+    adj.append([ns, ne, txt])
+    prev_end = ne
+
+# ----------------------------
+# Écriture ASS
 # ----------------------------
 hdr = f"""[Script Info]
 ScriptType: v4.00+
@@ -188,7 +197,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 with opath.open("w", encoding="utf-8") as f:
     f.write(hdr)
-    for s,e,txt in events:
+    for s, e, txt in adj:
         f.write(f"Dialogue: 0,{to_ass_ts(s)},{to_ass_ts(e)},TikTok,,0,0,0,,{txt}\n")
 
 print(f"[build_ass] écrit: {opath} (durée audio détectée: {audio_dur:.2f}s)")
+print(f"Anti-derivage appliqué: lead={lead:+.2f}s, speed={speed:.3f}")
