@@ -17,7 +17,7 @@ ap.add_argument("--min-chunk", type=float, default=1.0)
 
 # >>> Anti-dérive (nouveaux paramètres)
 ap.add_argument("--lead", type=float, default=-0.15, help="avance globale (s, négatif = plus tôt)")
-ap.add_argument("--speed", type=float, default=0.98, help="facteur de compression de durée (1.0 = inchangé)")
+ap.add_argument("--speed", type=float, default=1.0, help="facteur de compression de durée (1.0 = inchangé)")
 # <<<
 
 ap.add_argument("--primary-colour", default="&H0080FFF3")
