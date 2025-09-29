@@ -4,7 +4,7 @@
 """
 Génère un .ASS (karaoké simple) à partir d'un transcript texte et d'un audio.
 - Découpe par phrases.
-- Force 2 lignes par sous-titre (par défaut), avec N mots max par ligne.
+- Force 2 lignes par sous-titre (modifiable via --max-lines).
 - Répartit la durée totale de l'audio proportionnellement au nombre de mots.
 - Style par défaut lisible en ambiance sombre (jaune pâle + contour noir).
 """
@@ -12,14 +12,14 @@ Génère un .ASS (karaoké simple) à partir d'un transcript texte et d'un audio
 import sys, argparse, pathlib, subprocess, re
 
 # ----------------------------
-# Arguments simples à retenir
+# Arguments
 # ----------------------------
 ap = argparse.ArgumentParser()
 ap.add_argument("--transcript", required=True, help="Chemin du texte (ex: story/story.txt)")
 ap.add_argument("--audio", required=True, help="Chemin du WAV/MP3 (ex: audio/voice.wav)")
 ap.add_argument("--out", default="subs/captions.ass", help="Chemin .ass de sortie")
 ap.add_argument("--font", default="Arial", help="Police ASS")
-ap.add_argument("--size", type=int, default=60, help="Taille de police (ex: 60)")
+ap.add_argument("--size", type=int, default=80, help="Taille de police (ex: 60)")
 ap.add_argument("--align", type=int, default=5, help="Alignment ASS (5 = centré bas)")
 ap.add_argument("--margin-v", type=int, default=200, help="Marge verticale (px)")
 ap.add_argument("--words-per-line", type=int, default=4, help="Mots max par ligne")
@@ -73,46 +73,33 @@ RE_STAGE = re.compile(
 )
 
 def clean_text(s: str) -> str:
-    # supprime didascalies/directions évidentes
     s = RE_STAGE.sub("", s.strip())
-    # retire tags entre [] ou ()
     s = re.sub(r"\[[^\]]+\]", "", s)
     s = re.sub(r"\([^)]+\)", "", s)
-    # normalise espaces
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def split_sentences(text: str):
-    # découpe par ponctuation forte, en gardant le séparateur
     parts = re.split(r"([\.!?…]+)", text)
     out = []
-    buf = ""
     for i in range(0, len(parts), 2):
         chunk = parts[i].strip()
         sep = parts[i+1] if i+1 < len(parts) else ""
-        if not chunk and not sep:
-            continue
         buf = (chunk + sep).strip()
         if buf:
             out.append(buf)
-    # fallback si rien
     if not out:
         out = [text.strip()]
     return out
 
 def ass_escape(s: str) -> str:
-    # évite interprétation de { \ } en tags ASS
+    # Échapper le contenu UTILISATEUR (pas les \N)
     s = s.replace("\\", r"\\")
     s = s.replace("{", r"\{").replace("}", r"\}")
     return s
 
 def wrap_to_lines(words, max_lines=2, words_per_line=4):
-    """
-    Force max_lines (2 ou 3). Répartit les mots en lignes équilibrées,
-    en limitant ~ words_per_line par ligne.
-    """
     if max_lines < 1: max_lines = 1
-    # chunking brut d’abord
     chunks = []
     buf = []
     for w in words:
@@ -121,38 +108,29 @@ def wrap_to_lines(words, max_lines=2, words_per_line=4):
             chunks.append(" ".join(buf)); buf=[]
     if buf:
         chunks.append(" ".join(buf))
-
     if not chunks:
         return [""]
 
-    # Si trop de chunks, merge jusqu'à ne garder que max_lines
     while len(chunks) > max_lines:
-        # merge les deux plus courts
         lengths = [len(c.split()) for c in chunks]
-        # trouve l’index du plus court
         i = lengths.index(min(lengths))
-        # fusionne avec voisin (prend celui qui équilibre le mieux)
         if i < len(chunks)-1:
             chunks[i] = chunks[i] + " " + chunks[i+1]
             del chunks[i+1]
         else:
             chunks[i-1] = chunks[i-1] + " " + chunks[i]
             del chunks[i]
-
-    # Si moins de lignes que max_lines, on peut laisser tel quel (pas besoin de remplir)
     return chunks
 
 # ----------------------------
 # Lecture et préparation texte
 # ----------------------------
 raw = tpath.read_text(encoding="utf-8", errors="ignore")
-# coupe par lignes, nettoie chaque ligne, puis recompose pour couper en phrases
 lines = [clean_text(ln) for ln in raw.splitlines() if clean_text(ln)]
 full_text = " ".join(lines).strip()
 sentences = split_sentences(full_text)
 
-# tokenisation mots / préparation des items (2 lignes forcées)
-items = []  # chaque item: (words:list[str], text_lines:list[str])
+items = []
 total_words = 0
 for sent in sentences:
     w = sent.split()
@@ -171,32 +149,26 @@ if not items:
 # ----------------------------
 audio_dur = ffprobe_duration(apath)
 t = 0.0
-events = []  # (start, end, text_with_newline)
+events = []
 for w, lines_wrapped in items:
-    # part de durée proportionnelle au nb de mots
     share = (len(w) / total_words) * audio_dur
-    # impose un minimum raisonnable
     dur = max(args.min_chunk, share)
-    # si on dépasse la fin, on clippe le dernier
     end = min(audio_dur, t + dur)
     if end - t < 0.3 and end < audio_dur:
-        # si trop court, pousse un poil
         end = min(audio_dur, t + 0.3)
 
-    # compose le texte avec \N pour forcer 2/3 lignes
-    text = ass_escape((" \\N ".join(lines_wrapped)).strip())
+    # IMPORTANT : on échappe CHAQUE LIGNE, puis on les joint avec \N (non échappé)
+    escaped_lines = [ass_escape(line.strip()) for line in lines_wrapped if line.strip()]
+    text = r"\N".join(escaped_lines)
 
     events.append((t, end, text))
     t = end
 
-# Ajustement final (éviter dépassement en flottants)
 if events and events[-1][1] > audio_dur:
-    last = list(events[-1])
-    last[1] = audio_dur
-    events[-1] = tuple(last)
+    last = list(events[-1]); last[1] = audio_dur; events[-1] = tuple(last)
 
 # ----------------------------
-# Écriture du header ASS + events
+# Écriture du ASS
 # ----------------------------
 hdr = f"""[Script Info]
 ScriptType: v4.00+
