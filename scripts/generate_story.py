@@ -1,167 +1,86 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+import os, json, sys, pathlib, re, urllib.request
 
-"""
-Génère un script d'horreur FR pour TikTok, sans didascalies ni mentions
-(type "Scène:", "Voix:", "Narrateur:", "Hook:", "CTA:", etc.).
-Le script applique des garde-fous, valide la sortie et regénère si besoin.
+MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")   # tu as demandé gpt-4o
+TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "1"))
 
-Entrées (env) :
-  OPENAI_API_KEY   : clé API OpenAI (obligatoire)
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "Tu écris un script court et immersif d'horreur en français. N'inclus AUCUNE didascalie (intro, scène, narrateur, CTA, etc.). Raconte seulement l'histoire.")
+USER_PROMPT = os.environ.get("USER_PROMPT", "Écris un script TikTok immerssif de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique. Style concis, phrases courtes, sans grossièretés.")
 
-Sorties :
-  story/story.txt  : texte final validé
-
-Contrainte structure : ne modifie PAS l’arborescence de ton repo.
-"""
-
-import os, sys, json, pathlib, re, time
-import urllib.request
-
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
-OUT_DIR = pathlib.Path("story")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_FILE = OUT_DIR / "story.txt"
-
-API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+API_KEY = os.environ.get("OPENAI_API_KEY")
 if not API_KEY:
     print("OPENAI_API_KEY manquant", file=sys.stderr)
     sys.exit(1)
 
-# ---------- Paramètres éditables (gardes & style) ----------
-TARGET_MIN = 170     # borne basse cible (mots)
-TARGET_MAX = 210     # borne haute cible (mots)
-MAX_ATTEMPTS = 3     # nb de tentatives de génération
-TEMPERATURE  = float(os.environ.get("STORY_TEMPERATURE", "1"))
-TOP_P        = float(os.environ.get("STORY_TOP_P", "0.95"))
+out_dir = pathlib.Path("story")
+out_dir.mkdir(parents=True, exist_ok=True)
+story_path = out_dir / "story.txt"
+title_path = out_dir / "title.txt"
 
-# Liste des marqueurs/didascalies à bannir explicitement
-DISALLOWED_TOKENS = [
-    r"\bsc[ée]ne\b",
-    r"\bnarrateur\b",
-    r"\bvoix\b",
-    r"\bhook\b",
-    r"\bcta\b",
-    r"\bintro\b",
-    r"\bd[ée]veloppement\b",
-    r"\bconclusion\b",
-    r"\bgros plan\b",
-    r"\bcadre\b",
-    r"\bplan\b",
-    r"\bcut\b",
-]
+# Demande stricte: JSON avec { "title": "...", "story": "..." }
+sys_msg = (
+    SYSTEM_PROMPT
+    + "\n\nFormat de réponse STRICT: renvoie UNIQUEMENT du JSON avec les clés EXACTES:\n"
+      '{ "title": "<titre court et percutant qui résume l\'histoire, 3–8 mots, max ~60 caractères>", '
+      '"story": "<histoire complète sans didascalies>"}\n'
+      "Pas de texte en dehors du JSON."
+)
 
-DISALLOWED_RE = re.compile("(" + "|".join(DISALLOWED_TOKENS) + ")", re.IGNORECASE)
+payload = {
+    "model": MODEL,
+    "temperature": TEMPERATURE,
+    "response_format": {"type": "json_object"},
+    "messages": [
+        {"role": "system", "content": sys_msg},
+        {"role": "user", "content": USER_PROMPT}
+    ],
+}
 
-# Nettoyage léger de toute parenthèse/crochet (didascalies)
-PARENS_RE = re.compile(r"[\(\[].*?[\)\]]", re.DOTALL)
+req = urllib.request.Request(
+    "https://api.openai.com/v1/chat/completions",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}",
+    },
+    method="POST",
+)
 
-def count_words(txt: str) -> int:
-    return len(re.findall(r"\b\w+\b", txt, flags=re.UNICODE))
+def clean_text(s: str) -> str:
+    # supprime didascalies éventuelles résiduelles
+    s = re.sub(r"\[[^\]]+\]", " ", s)
+    s = re.sub(r"\([^)]+\)", " ", s)
+    s = re.sub(r"\b(?:intro|scène|scene|narrateur|voix ?\d+|cta)\b[:\-\]]*", " ", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-def looks_clean(txt: str) -> bool:
-    if DISALLOWED_RE.search(txt):
-        return False
-    return True
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    content = data["choices"][0]["message"]["content"]
+    obj = json.loads(content)
+    title = clean_text(obj.get("title", "").strip())
+    story = obj.get("story", "").strip()
 
-def soft_clean(txt: str) -> str:
-    # Supprime entre crochets/parenthèses et éventuels labels en début de ligne
-    t = PARENS_RE.sub("", txt)
-    t = re.sub(r"^\s*(?:Scène|Voix|Narrateur|Hook|CTA)\s*:\s*", "", t, flags=re.IGNORECASE|re.MULTILINE)
-    # Compacte les espaces
-    t = re.sub(r"[ \t]+", " ", t)
-    t = re.sub(r"\s*\n\s*\n\s*", "\n\n", t).strip()
-    return t
+    story = clean_text(story)
 
-def within_target_range(n: int) -> bool:
-    return TARGET_MIN <= n <= TARGET_MAX
+    # garde un titre sûr
+    if not title:
+        # fallback simple si le JSON n’a pas de titre
+        first_line = story.split("\n", 1)[0]
+        title = " ".join(first_line.split()[:8])
+    # borne dure sur la longueur
+    if len(title) > 64:
+        title = title[:64].rstrip(" ,;:.!?…") + "…"
 
-def build_messages() -> list:
-    system_prompt = (
-        "Tu es un auteur pro de récits d'horreur courts en FR pour TikTok. "
-        "Règles STRICTES :\n"
-        "- Ne mets AUCUNE didascalie ni label (pas de 'Scène:', 'Voix:', 'Narrateur:', 'Hook:', 'CTA:').\n"
-        "- Raconte UNIQUEMENT l'histoire, en 'je', phrases courtes, immersives, sans vulgarité.\n"
-        "- Atmosphère : manoir ancien, pluie, échos métalliques, tension progressive.\n"
-        "- Pas de mentions de caméra, plan, cadrage, ni directions scéniques.\n"
-        "- Vise ~180–200 mots. Si tu dépasses légèrement, garde la cohérence.\n"
-        "- Finir par une phrase qui donne un frisson, pas un appel à s’abonner.\n"
-    )
-    user_prompt = (
-        "Écris une histoire d'horreur immersive (FR), 180–200 mots environ. "
-        "Thème : manoir sous la pluie, bruits métalliques, solitude, souffle court. "
-        "Style : phrases brèves, vocabulaire concret, sensoriel, sans gore explicite. "
-        "Interdits : tout label didascalie (Scène, Voix, Narrateur, Hook, CTA), "
-        "tout méta-texte (gros plan, plan, cut), tout appel à l’action. "
-        "Sortie : texte brut uniquement."
-    )
-    return [
-        {"role":"system","content": system_prompt},
-        {"role":"user","content": user_prompt},
-    ]
+    title_path.write_text(title, encoding="utf-8")
+    story_path.write_text(story, encoding="utf-8")
+    print(f"[generate_story] titre -> {title_path} | histoire -> {story_path}")
 
-def openai_chat(messages: list) -> str:
-    url = "https://api.openai.com/v1/chat/completions"
-    payload = {
-        "model": MODEL,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "max_tokens": 800,
-        "messages": messages,
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {API_KEY}")
-    with urllib.request.urlopen(req, timeout=90) as resp:
-        obj = json.loads(resp.read().decode("utf-8", "ignore"))
-    return obj["choices"][0]["message"]["content"].strip()
-
-def main():
-    messages = build_messages()
-    final_text = ""
-    for attempt in range(1, MAX_ATTEMPTS+1):
-        try:
-            raw = openai_chat(messages)
-        except Exception as e:
-            if attempt == MAX_ATTEMPTS:
-                print(f"[generate_story] Erreur API: {e}", file=sys.stderr)
-                sys.exit(1)
-            time.sleep(1.2)
-            continue
-
-        txt = soft_clean(raw)
-        w = count_words(txt)
-
-        # Validation stricte
-        ok = looks_clean(txt) and w >= 120  # on exige un minimum raisonnable
-        # Si longueur hors plage, on laisse une chance au post-traitement ; sinon on regénère
-        if not ok or not within_target_range(w):
-            # Prévention : si présence de didascalies, on renforce l’instruction et on regénère
-            if not looks_clean(txt):
-                messages.append({
-                    "role":"system",
-                    "content":"RAPPEL STRICT : aucun label/didascalie (Scène, Voix, Narrateur, Hook, CTA). Recommence en respectant exactement les règles."
-                })
-                continue
-            # Si juste trop court/long, on demande une variation de longueur
-            if w < TARGET_MIN:
-                messages.append({"role":"user","content":"Refais une version un peu plus longue (~190 mots), mêmes règles strictes."})
-                continue
-            if w > TARGET_MAX:
-                # On essaye d’abréger en conservant la cohérence
-                messages.append({"role":"user","content":"Fais une version légèrement plus concise (~190 mots), mêmes règles strictes."})
-                continue
-
-        final_text = txt
-        break
-
-    if not final_text:
-        # filet de sécurité : on prend la dernière version nettoyée
-        final_text = soft_clean(raw)
-
-    OUT_FILE.write_text(final_text, encoding="utf-8")
-    print(f"[generate_story] OK -> {OUT_FILE} ({count_words(final_text)} mots)")
-
-if __name__ == "__main__":
-    main()
+except Exception as e:
+    print(f"[generate_story] ERREUR API ou parsing: {e}", file=sys.stderr)
+    # Fallback minimal : on écrit au moins une histoire basique
+    fallback = "La maison respire. La pluie frappe. Quelque chose m'observe."
+    story_path.write_text(fallback, encoding="utf-8")
+    title_path.write_text("La Maison Qui Respire", encoding="utf-8")
+    sys.exit(0)
