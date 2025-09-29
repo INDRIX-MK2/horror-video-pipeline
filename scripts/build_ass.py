@@ -13,7 +13,7 @@ ap.add_argument("--font", default="Arial")
 ap.add_argument("--size", type=int, default=60)           # taille par défaut des sous-titres
 ap.add_argument("--max-words", type=int, default=5)       # ~mots/ligne
 ap.add_argument("--max-lines", type=int, default=3)       # lignes max par event
-ap.add_argument("--align", type=int, default=2)           # 2 = bas centré (TikTok)
+ap.add_argument("--align", type=int, default=5)           # 5 = centré (TikTok)
 ap.add_argument("--margin-v", type=int, default=200)      # marge verticale
 
 # Anti-dérive (si besoin)
@@ -179,7 +179,7 @@ for i, txt in enumerate(story_chunks, start=1):
 
 # 3) CTA centré (si présent)
 if cta_txt and cta_d > 0.05:
-    cta_lines = wrap_words_to_lines(cta_txt, max_words=8, max_lines=2)
+    cta_lines = wrap_words_to_lines(cta_txt, max_words=20, max_lines=4)
     # démarre juste après la dernière ligne "histoire"
     last_story_end = max((ev["end"] for ev in events if ev["style"]=="TikTok"), default=t1_story)
     scta = max(t0_cta, last_story_end)
@@ -203,7 +203,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,{args.font},{args.size},&H00FFFFFF,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,{args.align},40,40,{args.margin_v},1
+Style: TikTok,{args.font},{args.size},&H00FFFF00,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,{args.align},40,40,{args.margin_v},1
 Style: Title,{args.font},{args.title_size},&H00FFFF00,&H00000000,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,3,2,5,40,40,40,1
 Style: CTA,{args.font},{args.cta_size},&H00FFFF00,&H00000000,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,3,2,5,40,40,40,1
 
