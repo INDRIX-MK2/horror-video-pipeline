@@ -28,20 +28,20 @@ ap.add_argument("--size", type=int, default=60)
 # Titre (centre, jaune, 4 mots/ligne)
 ap.add_argument("--title-max-words", type=int, default=4)
 ap.add_argument("--title-size", type=int, default=96)
-ap.add_argument("--title-colour", default="&H00FFFF00")     # jaune
+ap.add_argument("--title-colour", default="&H0033FFFF")     # jaune
 ap.add_argument("--title-align", type=int, default=5)       # centre-centre
 ap.add_argument("--title-marginv", type=int, default=0)
 
 # CTA (centre, jaune, 4 mots/ligne)
-ap.add_argument("--cta-max-words", type=int, default=4)
+ap.add_argument("--cta-max-words", type=int, default=3)
 ap.add_argument("--cta-size", type=int, default=80)
-ap.add_argument("--cta-colour", default="&H00FFFF00")
+ap.add_argument("--cta-colour", default="&H0047E0FD")
 ap.add_argument("--cta-align", type=int, default=5)
 ap.add_argument("--cta-marginv", type=int, default=0)
 
 # Histoire (2–3 lignes, 4–5 mots/ligne selon ton réglage)
 ap.add_argument("--story-max-words-per-line", type=int, default=4)
-ap.add_argument("--story-max-lines", type=int, default=3)
+ap.add_argument("--story-max-lines", type=int, default=4)
 ap.add_argument("--story-align", type=int, default=5)       # centre-centre (mets 2 pour bas-centre)
 ap.add_argument("--story-marginv", type=int, default=200)
 
@@ -251,7 +251,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,{args.font},{args.size},&H00FFFF00,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,{args.story_align},40,40,{args.story_marginv},1
+Style: TikTok,{args.font},{args.size},&H0072FFFA,&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,{args.story_align},40,40,{args.story_marginv},1
 Style: Title,{args.font},{args.title_size},{args.title_colour},&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,{args.title_align},40,40,{args.title_marginv},1
 Style: CTA,{args.font},{args.cta_size},{args.cta_colour},&H00000000,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,3,2,{args.cta_align},40,40,{args.cta_marginv},1
 
