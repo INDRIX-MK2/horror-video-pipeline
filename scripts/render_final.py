@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 import argparse, subprocess, pathlib, sys, shlex
 
-ap = argparse.ArgumentParser(description="Assemble la vidéo finale avec effets légers + sous-titres .ass")
+ap = argparse.ArgumentParser(description="Assemble la vidéo finale avec effets + sous-titres .ass")
 ap.add_argument("--video", required=True, help="merged.mp4")
-ap.add_argument("--audio", required=True, help="voice.wav (chaîne titre + pause + histoire + pause + cta)")
+ap.add_argument("--audio", required=True, help="voice.wav (chaîne: titre + pause + histoire + pause + cta)")
 ap.add_argument("--subs",  required=True, help="subs/captions.ass")
 ap.add_argument("--output", required=True, help="final_video/final_horror.mp4")
+
+# Options legacy (ignorées) pour compatibilité workflow existant
+ap.add_argument("--title-file", default=None, help="(ignoré) Titre géré dans le .ass")
+ap.add_argument("--cta-file", default=None, help="(ignoré) CTA géré dans le .ass")
+ap.add_argument("--timeline", default=None, help="(ignoré) Timeline gérée en amont")
+
 args = ap.parse_args()
 
 video = pathlib.Path(args.video)
@@ -19,7 +25,7 @@ for p, label in [(video,"vidéo"),(audio,"audio"),(subs,"sous-titres")]:
 
 out.parent.mkdir(parents=True, exist_ok=True)
 
-# Chaîne d'effets vidéo (pas de drawtext ; les titres/CTA viennent du .ass)
+# Effets vidéo doux (aucun drawtext ; tout passe par le .ass)
 vf = (
     "setpts=PTS-STARTPTS,"
     "scale=1200:2133:force_original_aspect_ratio=increase,"
