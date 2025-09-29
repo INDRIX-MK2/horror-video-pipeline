@@ -64,12 +64,13 @@ jobs:
           python scripts/voice_elevenlabs.py --transcript story/story.txt --out audio/voice.wav
           test -s audio/voice.wav
 
-      - name: Build ASS subtitles
+      - name: Build ASS subtitles (scripts/build_ass.py)
         run: |
           set -euo pipefail
           mkdir -p subs
-          python subtitles/build_ass.py --transcript story/story.txt --audio audio/voice.wav --out subs/captions.ass
+          python scripts/build_ass.py --transcript story/story.txt --audio audio/voice.wav --out subs/captions.ass
           test -s subs/captions.ass
+
 
       - name: Select & Merge Clips (cover length = voice length)
         run: |
