@@ -15,6 +15,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
+      MANIFEST_URL: ${{ secrets.MANIFEST_URL }}
       DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
@@ -23,27 +24,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Python & FFmpeg versions (pre)
-        run: |
-          python3 -V || true
-          ffmpeg -version || true
-
-      - name: Set up Python 3.12
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install FFmpeg
+      - name: Install system deps
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
 
       - name: Install Python deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Ensure folders
         shell: bash
@@ -51,137 +47,98 @@ jobs:
           set -euo pipefail
           mkdir -p story audio selected_media subs final_video manifests
 
-      # ===============================
-      # 1) Génération Titre / Histoire / CTA
-      # ===============================
+      # 1) Générer Titre + Histoire + CTA (ton script existant)
       - name: Generate title + story + cta
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/generate_story.py
+          python scripts/generate_story.py \
+            --system "Tu écris un script court et immersif d'horreur en français. Pas de didascalies (intro, scène, narrateur, CTA...). Raconte uniquement l'histoire." \
+            --user "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés." \
+            --title-out story/title.txt \
+            --story-out story/story.txt \
+            --cta-out   story/cta.txt
           echo "[generate_story] titre -> story/title.txt | histoire -> story/story.txt | cta -> story/cta.txt"
           [ -s story/title.txt ] || { echo "title.txt manquant/vide"; exit 1; }
           [ -s story/story.txt ] || { echo "story.txt manquant/vide"; exit 1; }
-          [ -s story/cta.txt ] || { echo "cta.txt manquant/vide"; exit 1; }
+          [ -s story/cta.txt ]   || { echo "cta.txt manquant/vide"; exit 1; }
 
-      # ===============================
-      # 2) TTS ElevenLabs (titre + histoire + cta) puis concat
-      # ===============================
-      - name: TTS ElevenLabs (title)
+      # 2) TTS ElevenLabs (CORRECTIF: plus de --transcript, on passe --title-file/--story-file/--cta-file)
+      - name: Synthesize voice (title + 1s + story + 1s + cta)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p audio
-          python scripts/voice_elevenlabs.py --transcript story/title.txt --out audio/title.wav
-          [ -s audio/title.wav ] || { echo "title.wav manquant"; exit 1; }
-
-      - name: TTS ElevenLabs (story)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/voice_elevenlabs.py --transcript story/story.txt --out audio/story.wav
-          [ -s audio/story.wav ] || { echo "story.wav manquant"; exit 1; }
-
-      - name: TTS ElevenLabs (cta)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/voice_elevenlabs.py --transcript story/cta.txt --out audio/cta.wav
-          [ -s audio/cta.wav ] || { echo "cta.wav manquant"; exit 1; }
-
-      - name: Concat TTS (title + 1s silence + story + 1s silence + cta) => voice.wav
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Silences de 1s
-          ffmpeg -nostdin -y -f lavfi -i anullsrc=r=48000:cl=stereo -t 1 audio/silence1.wav
-          cp audio/silence1.wav audio/silence2.wav
-          # Liste pour concat
-          printf "file '%s'\n" "audio/title.wav"        >  audio/voice.txt
-          printf "file '%s'\n" "audio/silence1.wav"    >> audio/voice.txt
-          printf "file '%s'\n" "audio/story.wav"       >> audio/voice.txt
-          printf "file '%s'\n" "audio/silence2.wav"    >> audio/voice.txt
-          printf "file '%s'\n" "audio/cta.wav"         >> audio/voice.txt
-          ffmpeg -nostdin -y -f concat -safe 0 -i audio/voice.txt -c copy audio/voice.wav
+          python scripts/voice_elevenlabs.py \
+            --title-file story/title.txt \
+            --story-file story/story.txt \
+            --cta-file   story/cta.txt \
+            --gap-title 1.0 \
+            --gap-cta   1.0 \
+            --out       audio/voice.wav \
+            --list-file audio/voice.txt
           [ -s audio/voice.wav ] || { echo "voice.wav manquant"; exit 1; }
+          [ -s audio/timeline.json ] || { echo "timeline.json manquant"; exit 1; }
 
-      # ===============================
-      # 3) Sous-titres (ASS) — centre (=5), jaune — story uniquement
-      # (Le titre et CTA sont incrustés par render_final.py via drawtext)
-      # ===============================
-      - name: Build subtitles (ASS) from story
+      # 3) Sélection/merge vidéos selon MANIFEST_URL (inchangé)
+      - name: Select & merge background clips
         shell: bash
         run: |
           set -euo pipefail
-          # On synchronise les sous-titres sur la narration d'histoire uniquement :
-          #   => on passe l'audio 'audio/story.wav' au builder
-          python scripts/build_ass.py \
-            --transcript story/story.txt \
-            --audio audio/story.wav \
-            --out subs/captions.ass \
-            --align 5 \
-            --colour "&H0000FFFF" \
-            --max-words 4 \
-            --max-lines 3 \
-            --lead 0 \
-            --speed 1
-          [ -s subs/captions.ass ] || { echo "captions.ass manquant"; exit 1; }
-
-      # ===============================
-      # 4) Sélection / Merge vidéo depuis manifest local (URLs)
-      # ===============================
-      - name: Select and merge clips (from manifest)
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -s manifests/horreur.txt ] || { echo "manifests/horreur.txt manquant/vide"; exit 1; }
+          : "${MANIFEST_URL:?MANIFEST_URL manquant}"
           python scripts/select_and_merge.py \
             --manifest manifests/horreur.txt \
             --audio audio/voice.wav \
             --out selected_media/merged.mp4
           [ -s selected_media/merged.mp4 ] || { echo "merged.mp4 manquant"; exit 1; }
 
-      # ===============================
-      # 5) Rendu final (fondus, sous-titres, titre/CTA centrés)
-      # ===============================
-      - name: Render final
+      # 4) Sous-titres (ASS) centrés/jaunes (story uniquement – si tu utilises la version “story-only”)
+      - name: Build ASS subtitles (story)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_ass.py \
+            --transcript story/story.txt \
+            --audio audio/voice.wav \
+            --out subs/captions.ass \
+            --font "Arial" \
+            --size 80 \
+            --colour "&H0000FFFF" \
+            --align 5 \
+            --marginv 200 \
+            --max-words 4 \
+            --max-lines 3 \
+            --lead 0.00 \
+            --speed 1.00
+          [ -s subs/captions.ass ] || { echo "captions.ass manquant"; exit 1; }
+
+      # 5) Render final (fondu noir + subs + audio)
+      - name: Render final video
         shell: bash
         run: |
           set -euo pipefail
           python scripts/render_final.py \
             --video selected_media/merged.mp4 \
             --audio audio/voice.wav \
-            --subs subs/captions.ass \
-            --title-file story/title.txt \
-            --cta-file story/cta.txt \
+            --subs  subs/captions.ass \
             --output final_video/${OUT_NAME}
-          [ -s final_video/${OUT_NAME} ] || { echo "final video manquante"; exit 1; }
+          [ -s "final_video/${OUT_NAME}" ] || { echo "final video manquante"; exit 1; }
 
-      # ===============================
-      # 6) Upload Dropbox (refresh token ONLY)
-      # ===============================
-      - name: Upload to Dropbox (refresh-token flow)
+      # 6) Upload Dropbox (refresh-token ONLY)
+      - name: Upload to Dropbox
         shell: bash
         run: |
           set -euo pipefail
           python scripts/dropbox_upload.py \
-            --file final_video/${OUT_NAME} \
+            --file "final_video/${OUT_NAME}" \
             --remote-dir "/horror" \
-            --out-link final_video/dropbox_link.txt
-          [ -s final_video/dropbox_link.txt ] || { echo "dropbox_link.txt manquant"; exit 1; }
-          echo "Dropbox link:"
-          cat final_video/dropbox_link.txt
+            --out-link "final_video/dropbox_link.txt"
+          [ -s final_video/dropbox_link.txt ] || { echo "Lien Dropbox manquant"; exit 1; }
 
-      # ===============================
-      # 7) Artifacts
-      # ===============================
-      - name: Upload artifacts (video + link + logs)
+      - name: Upload artifact (final video + link)
         uses: actions/upload-artifact@v4
         with:
-          name: build_outputs
-          path: |
-            story/
-            audio/
-            subs/
-            selected_media/
-            final_video/
+            name: final_assets
+            path: |
+              final_video/
+              audio/timeline.json
+              subs/captions.ass
