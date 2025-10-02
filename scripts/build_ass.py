@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-import sys, argparse, pathlib, subprocess, re, json
+# coding: utf-8
+import argparse, pathlib, subprocess, sys, re
 
-def ffprobe_dur(p: pathlib.Path) -> float:
+# -------- Utils --------
+def ffprobe_duration(path: pathlib.Path) -> float:
     try:
         out = subprocess.check_output([
-            "ffprobe","-v","error","-show_entries","format=duration",
-            "-of","default=nk=1:nw=1", str(p)
-        ], text=True).strip()
+            "ffprobe","-v","error",
+            "-show_entries","format=duration",
+            "-of","default=nk=1:nw=1",
+            str(path)
+        ]).decode("utf-8","ignore").strip()
         return float(out)
     except Exception:
         return 0.0
@@ -19,155 +23,132 @@ def to_ass_ts(sec: float) -> str:
     cs = int(round((sec - int(sec)) * 100))
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
-def clean_text(s: str) -> str:
-    # on enlève crochets/didascalies et normalise espaces
-    s = re.sub(r"\[[^\]]+\]", " ", s)
-    s = re.sub(r"\([^)]+\)", " ", s)
-    s = s.replace("\\", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def split_words_lines(text: str, max_words_per_line: int, max_lines: int):
-    words = text.split()
-    if not words:
+def split_sentences(text: str):
+    # coupe sur . ! ? … (en gardant la ponctuation)
+    text = text.replace("\r","")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
         return []
+    parts = re.split(r'(?<=[\.\!\?\…])\s+', text)
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts
+
+def wrap_words_to_lines(words, max_words_per_line: int, max_lines: int):
+    """Retourne la chaîne ASS avec \\N entre lignes, max n lignes."""
     lines, buf = [], []
     for w in words:
         buf.append(w)
         if len(buf) >= max_words_per_line:
-            lines.append(" ".join(buf)); buf=[]
+            lines.append(" ".join(buf))
+            buf = []
             if len(lines) >= max_lines:
-                # on continue la ligne en cours dans la dernière
-                if words.index(w) < len(words)-1 and buf:
-                    lines[-1] += " " + " ".join(buf)
-                buf=[]
+                # s'il reste des mots, on les ajoute à la dernière ligne
+                lines[-1] += (" " + " ".join(buf)) if buf else ""
+                buf = []
                 break
     if buf:
         lines.append(" ".join(buf))
-    # coupe proprement à max_lines
-    return lines[:max_lines]
+    # jointure ASS pour retour à la ligne
+    return r"\N".join(lines[:max_lines])
 
-ap = argparse.ArgumentParser(description="Build ASS (title -> gap -> story -> gap -> cta), centered, yellow")
-ap.add_argument("--transcript",  required=True, help="story/story.txt")
-ap.add_argument("--audio",       required=True, help="audio/voice.wav (total)")
-ap.add_argument("--out",         default="subs/captions.ass")
+def count_words(s: str) -> int:
+    return len(s.split())
 
-ap.add_argument("--title-text",  required=True, help="story/title.txt")
-ap.add_argument("--cta-text",    required=True, help="story/cta.txt")
-ap.add_argument("--title-audio", required=True, help="audio/title.wav")
-ap.add_argument("--story-audio", required=True, help="audio/story.wav")
-ap.add_argument("--cta-audio",   required=True, help="audio/cta.wav")
-
-ap.add_argument("--title-gap-after", type=float, default=1.0)
-ap.add_argument("--gap-before-cta",  type=float, default=1.0)
-
-# Style global (modifiable via env / workflow)
+# -------- CLI --------
+ap = argparse.ArgumentParser(description="Build centered ASS subtitles (title/story/cta-ready) with anti-drift.")
+ap.add_argument("--transcript", required=True, help="Fichier texte (histoire uniquement dans ce script).")
+ap.add_argument("--audio", required=True, help="WAV/MP3 correspondant à la narration finale (title + story + cta si enchaînés).")
+ap.add_argument("--out", default="subs/captions.ass", help="Fichier ASS de sortie.")
 ap.add_argument("--font", default="Arial")
-ap.add_argument("--size", type=int, default=80)
-ap.add_argument("--colour", default="&H00FFFF00")         # jaune
-ap.add_argument("--outline-colour", default="&H00000000") # noir
-ap.add_argument("--back-colour", default="&H40000000")
-ap.add_argument("--outline", type=int, default=3)
-ap.add_argument("--shadow", type=int, default=2)
-ap.add_argument("--align",  type=int, default=5)
+ap.add_argument("--size", type=int, default=60)
+ap.add_argument("--colour", default="&H0000FFFF", help="ASS PrimaryColour (ex: &H0000FFFF = jaune vif).")
+ap.add_argument("--outline-colour", default="&H00000000")
+ap.add_argument("--back-colour", default="&H64000000")
+ap.add_argument("--outline", type=float, default=3.0)
+ap.add_argument("--shadow", type=float, default=2.0)
+ap.add_argument("--align", type=int, default=5, help="ASS Alignment (5 = centre bas).")
 ap.add_argument("--marginv", type=int, default=200)
-
-# Story layout & timing
-ap.add_argument("--story-max-words", type=int, default=4)  # max 4 mots / ligne
-ap.add_argument("--story-max-lines", type=int, default=3)  # 2~3 lignes
-ap.add_argument("--lead",  type=float, default=0.0)        # avance sous-titres (s) (anti-lag +/-)
-ap.add_argument("--speed", type=float, default=1.0)        # étirement global (1.0 = exact)
+ap.add_argument("--max-words", type=int, default=4, help="Mots max par ligne.")
+ap.add_argument("--max-lines", type=int, default=3, help="Lignes max (2-3 conseillé).")
+ap.add_argument("--lead", type=float, default=0.00, help="Décalage d’ancrage (s) pour anti-dérive (+avance, -retard).")
+ap.add_argument("--speed", type=float, default=1.00, help="Facteur vitesse (1.0 = proportionalité exacte, >1 = plus lent).")
 
 args = ap.parse_args()
 
-t_title = pathlib.Path(args.title_text).read_text(encoding="utf-8").strip()
-t_story = pathlib.Path(args.transcript).read_text(encoding="utf-8").strip()
-t_cta   = pathlib.Path(args.cta_text).read_text(encoding="utf-8").strip()
-
-t_title = clean_text(t_title)
-t_story = clean_text(t_story)
-t_cta   = clean_text(t_cta)
-
-pa_title = pathlib.Path(args.title_audio)
-pa_story = pathlib.Path(args.story_audio)
-pa_cta   = pathlib.Path(args.cta_audio)
-
-d_title = ffprobe_dur(pa_title)
-d_story = ffprobe_dur(pa_story)
-d_cta   = ffprobe_dur(pa_cta)
-
-if d_title <= 0 or d_story <= 0 or d_cta <= 0:
-    print("[build_ass] ERREUR: durations audio invalides", file=sys.stderr)
-    sys.exit(2)
-
-# Timeline
-t0 = 0.0
-t1 = t0 + d_title
-t1 += max(0.0, args.title_gap_after)
-
-s0 = t1
-s1 = s0 + d_story
-
-c0 = s1 + max(0.0, args.gap_before_cta)
-c1 = c0 + d_cta
-
-# STYLE ASS
-hdr = (
-    "[Script Info]\n"
-    "ScriptType: v4.00+\n"
-    "PlayResX: 1080\n"
-    "PlayResY: 1920\n"
-    "WrapStyle: 2\n"
-    "ScaledBorderAndShadow: yes\n"
-    "YCbCr Matrix: TV.709\n\n"
-    "[V4+ Styles]\n"
-    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-    "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-    "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-    f"Style: TikTok,{args.font},{args.size},{args.colour},&H00000000,{args.outline_colour},{args.back_colour},"
-    "0,0,0,0,100,100,0,0,1," f"{args.outline},{args.shadow},{args.align},40,40,{args.marginv},1\n\n"
-    "[Events]\n"
-    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-)
-
+tpath = pathlib.Path(args.transcript)
+apath = pathlib.Path(args.audio)
 opath = pathlib.Path(args.out)
 opath.parent.mkdir(parents=True, exist_ok=True)
 
-def esc_ass(s: str) -> str:
-    # Assainit les caractères spéciaux pour champ Text
-    s = s.replace("{","(").replace("}",")")
-    s = s.replace("\n"," ").replace("\r"," ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+if not tpath.exists() or not tpath.stat().st_size:
+    print("Transcript introuvable/vide", file=sys.stderr); sys.exit(1)
+if not apath.exists() or not apath.stat().st_size:
+    print("Audio introuvable/vide", file=sys.stderr); sys.exit(1)
 
+# -------- Lecture données --------
+raw = tpath.read_text(encoding="utf-8")
+# on enlève les crochets/didascalies s'il y en a
+raw = re.sub(r"\[[^\]]+\]", "", raw)
+raw = re.sub(r"\([^)]+\)", "", raw)
+sentences = split_sentences(raw)
+
+if not sentences:
+    print("Aucune phrase détectée dans le transcript.", file=sys.stderr)
+    # on force quand même une ligne
+    sentences = [raw.strip()]
+
+audio_dur = max(0.01, ffprobe_duration(apath))
+
+# -------- Timing anti-drift (proportionnel au nombre de mots) --------
+# total mots
+total_words = sum(count_words(s) for s in sentences) or 1
+# durée par mot, modulée par speed (speed>1 => plus de temps par mot)
+per_word = (audio_dur / total_words) * float(args.speed)
+
+# événements (start, end, text_ass)
 events = []
+t = 0.0 + float(args.lead)
+min_dur = 0.40  # sécurité lecture
+for i, s in enumerate(sentences):
+    wc = max(1, count_words(s))
+    dur = max(min_dur, wc * per_word)
+    s_start = max(0.0, t)
+    s_end   = min(audio_dur, s_start + dur)
 
-# Title (sur 1–2 lignes max 4 mots/ligne, centré)
-title_lines = split_words_lines(t_title, max_words_per_line=4, max_lines=2)
-if not title_lines:
-    title_lines = [t_title]
-title_text = "\\N".join(esc_ass(l) for l in title_lines)
-events.append((t0 + args.lead, t1 + args.lead, title_text))
+    # wrap sur 2-3 lignes, 4 mots max/ligne (paramétrable)
+    txt_ass = wrap_words_to_lines(s.split(), max(args.max_words,1), max(args.max_lines,1))
+    # pas de backslash inutile à la fin, on a uniquement \N au milieu si besoin
+    events.append((s_start, s_end, txt_ass))
+    t = s_end
 
-# Story (chunks uniformes sur toute la durée)
-# On casse le transcript en blocs de 2–3 lignes, 4 mots/ligne (env)
-story_words = t_story.split()
-# construire des chunks (groupes) en ~ 2 lignes max_lines par chunk
-chunk_lines, line_buf, lines = [], [], []
-for w in story_words:
-    line_buf.append(w)
-    if len(line_buf) >= args.story_max_words:
-        lines.append(" ".join(line_buf)); line_buf=[]
-if line_buf:
-    lines.append(" ".join(line_buf))
-# regrouper N lignes par événement (max_lines)
-for i in range(0, len(lines), args.story_max_lines):
-    grp = lines[i:i+args.story_max_lines]
-    chunk_lines.append("\\N".join(esc_ass(x) for x in grp))
+# S'assure que le dernier s'aligne pile à la fin pour éviter le glissement visuel
+if events:
+    last = list(events[-1])
+    if last[1] < audio_dur:
+        last[1] = audio_dur
+        events[-1] = tuple(last)
 
-n = max(1, len(chunk_lines))
-per = (d_story / n) * (1.0/args.speed)
-t = s0
-for txt in chunk_lines:
-    s = t
-    e = 
+# -------- En-tête ASS --------
+hdr = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TikTok,{args.font},{args.size},{args.colour},&H00000000,{args.outline-colour},{args.back-colour},0,0,0,0,100,100,0,0,1,{args.outline},{args.shadow},{args.align},40,40,{args.marginv},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+""".replace("\r\n","\n")
+
+# ------ Écriture ------
+with opath.open("w", encoding="utf-8") as f:
+    f.write(hdr)
+    for s_start, s_end, txt_ass in events:
+        f.write(f"Dialogue: 0,{to_ass_ts(s_start)},{to_ass_ts(s_end)},TikTok,,0,0,0,,{txt_ass}\n")
+
+print(f"[build_ass] écrit: {opath} (durée audio détectée: {audio_dur:.2f}s)")
