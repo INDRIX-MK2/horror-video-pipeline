@@ -27,14 +27,14 @@ CTA_FILE = OUT_DIR / "cta.txt"
 
 # Prompts
 SYSTEM_PROMPT = (
-    "Tu es un auteur de micro-histoires d'horreur en français. "
+    "Tu es un auteur de micro-histoires d'horreur immerssive en français. "
     "Tu écris de façon immersive, sans didascalies, sans mentions de scène, sans 'Narrateur'. "
     "Phrases courtes. Atmosphérique. Zéro grossièreté."
 )
 
 # Le user prompt cible 180–200 mots et exige un TITRE distinct + CTA distinct.
 USER_PROMPT = (
-    "Écris une histoire d'horreur atmosphérique (manoir, pluie, bruits métalliques), "
+    "Écris une histoire d'horreur atmosphérique, "
     "en 180 à 200 mots, phrases courtes, sans didascalies (pas d'« intro », « scène », « narrateur »). "
     "Donne aussi: (1) un TITRE bref qui résume l'histoire (6–10 mots max), "
     "(2) un CTA de 1 à 2 lignes invitant à s'abonner et partager. "
