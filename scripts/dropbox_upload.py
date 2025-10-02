@@ -1,203 +1,162 @@
 #!/usr/bin/env python3
-# coding: utf-8
-import argparse, pathlib, sys, time, json, os, base64
-import urllib.request, urllib.error, urllib.parse  # <- parse importé
+import os, sys, json, time, pathlib, urllib.request, urllib.parse, base64, subprocess, tempfile
 
-OAUTH_TOKEN_URL = "https://api.dropbox.com/oauth2/token"
-UPLOAD_URL      = "https://content.dropboxapi.com/2/files/upload"
-UPLOAD_START    = "https://content.dropboxapi.com/2/files/upload_session/start"
-UPLOAD_APPEND   = "https://content.dropboxapi.com/2/files/upload_session/append_v2"
-UPLOAD_FINISH   = "https://content.dropboxapi.com/2/files/upload_session/finish"
-LINK_CREATE     = "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings"
-LINK_LIST       = "https://api.dropboxapi.com/2/sharing/list_shared_links"
+import argparse
+ap = argparse.ArgumentParser()
+ap.add_argument("--file", required=True, help="Fichier local à uploader")
+ap.add_argument("--remote-dir", default="/horror")
+ap.add_argument("--out-link", default="final_video/dropbox_link.txt")
+args = ap.parse_args()
 
-CHUNK_SIZE  = 15 * 1024 * 1024   # 15MB
-SMALL_LIMIT = 150 * 1024 * 1024  # 150MB
+fpath = pathlib.Path(args.file)
+if not fpath.exists() or not fpath.stat().st_size:
+    print(f"Fichier introuvable/vide: {fpath}", file=sys.stderr); sys.exit(1)
 
-def http_json(url, data=None, headers=None, method="POST"):
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+out_link = pathlib.Path(args.out_link)
+out_link.parent.mkdir(parents=True, exist_ok=True)
+
+APP_KEY = os.environ.get("DROPBOX_APP_KEY","").strip()
+APP_SECRET = os.environ.get("DROPBOX_APP_SECRET","").strip()
+REFRESH = os.environ.get("DROPBOX_REFRESH_TOKEN","").strip()
+ACCESS = os.environ.get("DROPBOX_ACCESS_TOKEN","").strip()
+
+def token_from_refresh():
+    if not (APP_KEY and APP_SECRET and REFRESH):
+        return None
+    data = urllib.parse.urlencode({
+        "grant_type":"refresh_token",
+        "refresh_token": REFRESH
+    }).encode("utf-8")
+    basic = base64.b64encode(f"{APP_KEY}:{APP_SECRET}".encode("utf-8")).decode("ascii")
+    req = urllib.request.Request(
+        "https://api.dropboxapi.com/oauth2/token",
+        data=data,
+        headers={"Authorization": f"Basic {basic}", "Content-Type":"application/x-www-form-urlencoded"},
+        method="POST"
+    )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return resp.read(), resp.getcode()
-    except urllib.error.HTTPError as e:
-        body = e.read()
-        return body, e.code
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            j = json.loads(resp.read().decode("utf-8"))
+            return j.get("access_token")
     except Exception as e:
-        return str(e).encode("utf-8"), 0
+        print(f"refresh_token échec: {e}", file=sys.stderr)
+        return None
 
-def oauth_refresh(app_key, app_secret, refresh_token):
-    # Corps x-www-form-urlencoded
-    payload = (
-        "grant_type=refresh_token&refresh_token="
-        + urllib.parse.quote(refresh_token)
-    ).encode("utf-8")
+token = token_from_refresh() or ACCESS
+if not token:
+    print("Aucun token Dropbox dispo (refresh recommandé ou access token simple).", file=sys.stderr)
+    sys.exit(1)
 
-    # En-tête Basic correct (Base64 de "app_key:app_secret")
-    basic = "Basic " + base64.b64encode(f"{app_key}:{app_secret}".encode("utf-8")).decode("ascii")
+remote_dir = args.remote_dir if args.remote_dir.startswith("/") else "/"+args.remote_dir
+ts = time.strftime("%Y%m%d_%H%M%S")
+remote_path = f"{remote_dir}/{ts}_{fpath.name}"
 
-    body, code = http_json(
-        OAUTH_TOKEN_URL,
-        data=payload,
+size = fpath.stat().st_size
+def http_json(req):
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def upload_simple():
+    api_arg = json.dumps({"path": remote_path, "mode":"add", "autorename":True, "mute":False})
+    req = urllib.request.Request(
+        "https://content.dropboxapi.com/2/files/upload",
+        data=fpath.read_bytes(),
         headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": basic,
-        },
-        method="POST",
+            "Authorization": f"Bearer {token}",
+            "Dropbox-API-Arg": api_arg,
+            "Content-Type": "application/octet-stream"
+        }, method="POST"
     )
-    if code != 200:
-        sys.stderr.write(f"[dropbox] Refresh token échec http={code} body={body[:400]!r}\n")
-        return None
-    try:
-        j = json.loads(body.decode("utf-8"))
-        return j.get("access_token")
-    except Exception:
-        return None
+    return http_json(req)
 
-def upload_small(access_token, local_path: pathlib.Path, remote_path: str):
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Dropbox-API-Arg": json.dumps({
-            "path": remote_path,
-            "mode": "add",
-            "autorename": True,
-            "mute": False
-        }),
-        "Content-Type": "application/octet-stream"
-    }
-    data = local_path.read_bytes()
-    return http_json(UPLOAD_URL, data=data, headers=headers, method="POST")
-
-def upload_large(access_token, local_path: pathlib.Path, remote_path: str):
+def upload_chunked():
     # start
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": json.dumps({"close": False})
-    }
-    body, code = http_json(UPLOAD_START, data=b"", headers=headers, method="POST")
-    if code != 200:
-        return code, body
-    try:
-        sid = json.loads(body.decode("utf-8"))["session_id"]
-    except Exception:
-        return 0, b"invalid start response"
-
-    size = local_path.stat().st_size
-    sent = 0
-    with local_path.open("rb") as f:
-        while sent < size:
-            chunk = f.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/octet-stream",
-                "Dropbox-API-Arg": json.dumps({
-                    "cursor": {"session_id": sid, "offset": sent},
-                    "close": False
-                })
-            }
-            body, code = http_json(UPLOAD_APPEND, data=chunk, headers=headers, method="POST")
-            if code != 200:
-                return code, body
-            sent += len(chunk)
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": json.dumps({
-            "cursor": {"session_id": sid, "offset": size},
-            "commit": {"path": remote_path, "mode": "add", "autorename": True, "mute": False}
-        })
-    }
-    return http_json(UPLOAD_FINISH, data=b"", headers=headers, method="POST")
-
-def ensure_shared_link(access_token, remote_path: str):
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    # tenter création
-    body, code = http_json(
-        LINK_CREATE,
-        data=json.dumps({"path": remote_path}).encode("utf-8"),
-        headers=headers, method="POST"
+    req = urllib.request.Request(
+        "https://content.dropboxapi.com/2/files/upload_session/start",
+        data=b"",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+            "Dropbox-API-Arg": json.dumps({"close": False})
+        }, method="POST"
     )
-    if code == 200:
-        try:
-            return json.loads(body.decode("utf-8")).get("url","")
-        except Exception:
-            pass
-    # sinon lister
-    body, code = http_json(
-        LINK_LIST,
-        data=json.dumps({"path": remote_path, "direct_only": True}).encode("utf-8"),
-        headers=headers, method="POST"
+    start = http_json(req)
+    sid = start["session_id"]
+    chunk = 15*1024*1024
+    with open(fpath,"rb") as fh:
+        off = 0
+        while True:
+            data = fh.read(chunk)
+            if not data: break
+            arg = {"cursor":{"session_id":sid,"offset":off},"close": False}
+            req = urllib.request.Request(
+                "https://content.dropboxapi.com/2/files/upload_session/append_v2",
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type":"application/octet-stream",
+                    "Dropbox-API-Arg": json.dumps(arg)
+                }, method="POST"
+            )
+            urllib.request.urlopen(req, timeout=120).read()
+            off += len(data)
+    commit = {
+        "cursor":{"session_id":sid,"offset": size},
+        "commit":{"path":remote_path,"mode":"add","autorename":True,"mute":False}
+    }
+    req = urllib.request.Request(
+        "https://content.dropboxapi.com/2/files/upload_session/finish",
+        data=b"",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":"application/octet-stream",
+            "Dropbox-API-Arg": json.dumps(commit)
+        }, method="POST"
     )
-    if code == 200:
-        try:
-            j = json.loads(body.decode("utf-8"))
-            links = j.get("links") or []
-            if links:
-                return links[0].get("url","")
-        except Exception:
-            pass
-    return ""
+    return http_json(req)
 
-def main():
-    p = argparse.ArgumentParser(description="Upload to Dropbox (refresh token only) and write share link.")
-    p.add_argument("--file", required=True, help="Chemin du fichier local à uploader")
-    p.add_argument("--remote-dir", dest="remote_dir", default="/horror", help="Dossier Dropbox de destination")
-    p.add_argument("--out-link", dest="out_link", default="final_video/dropbox_link.txt", help="Fichier où écrire le lien")
-    args = p.parse_args()
-
-    local = pathlib.Path(args.file)
-    if not local.exists() or not local.stat().st_size:
-        sys.stderr.write(f"[dropbox] Fichier manquant/vide: {local}\n")
-        sys.exit(1)
-
-    app_key    = os.getenv("DROPBOX_APP_KEY", "")
-    app_secret = os.getenv("DROPBOX_APP_SECRET", "")
-    refresh    = os.getenv("DROPBOX_REFRESH_TOKEN", "")
-    if not (app_key and app_secret and refresh):
-        sys.stderr.write("[dropbox] Variables manquantes: DROPBOX_APP_KEY / DROPBOX_APP_SECRET / DROPBOX_REFRESH_TOKEN\n")
-        sys.exit(1)
-
-    access_token = oauth_refresh(app_key, app_secret, refresh)
-    if not access_token:
-        sys.stderr.write("[dropbox] Impossible d’obtenir un access_token via refresh token.\n")
-        sys.exit(1)
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    remote_dir = args.remote_dir.rstrip("/")
-    remote_dir = remote_dir if remote_dir else ""
-    remote_path = f"{remote_dir}/{ts}_{local.name}" if remote_dir else f"/{ts}_{local.name}"
-
-    size = local.stat().st_size
-    if size <= SMALL_LIMIT:
-        code, body = upload_small(access_token, local, remote_path)
+try:
+    if size <= 150*1024*1024:
+        up = upload_simple()
     else:
-        code, body = upload_large(access_token, local, remote_path)
+        up = upload_chunked()
+except urllib.error.HTTPError as e:
+    body = e.read().decode("utf-8","ignore")
+    print(f"Upload HTTPError: {e.code} {body}", file=sys.stderr)
+    sys.exit(1)
 
-    if code < 200 or code >= 300:
-        sys.stderr.write(f"[dropbox] Upload échec http={code} body={body[:400]!r}\n")
-        sys.exit(1)
+# create (or fetch) shared link
+def get_or_create_link():
+    payload = json.dumps({"path": remote_path}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings",
+        data=payload,
+        headers={"Authorization": f"Bearer {token}", "Content-Type":"application/json"},
+        method="POST"
+    )
+    try:
+        j = http_json(req); return j.get("url","")
+    except urllib.error.HTTPError as e:
+        # peut déjà exister
+        payload2 = json.dumps({"path":remote_path,"direct_only":True}).encode("utf-8")
+        req2 = urllib.request.Request(
+            "https://api.dropboxapi.com/2/sharing/list_shared_links",
+            data=payload2,
+            headers={"Authorization": f"Bearer {token}", "Content-Type":"application/json"},
+            method="POST"
+        )
+        j2 = http_json(req2)
+        links = j2.get("links") or []
+        if links: return links[0].get("url","")
+        raise
 
-    url = ensure_shared_link(access_token, remote_path)
-    if not url:
-        sys.stderr.write("[dropbox] Impossible d’obtenir un lien partageable.\n")
-        sys.exit(1)
+url = get_or_create_link()
+if not url:
+    print("Pas de lien partagé renvoyé par Dropbox.", file=sys.stderr); sys.exit(1)
 
-    # Forcer lien direct (?dl=1)
-    if url.endswith("?dl=0"):
-        url = url[:-5] + "?dl=1"
-    elif "?dl=0" in url:
-        url = url.replace("?dl=0", "?dl=1")
+# transformer ?dl=0 en ?dl=1
+if url.endswith("?dl=0"):
+    url = url[:-5] + "?dl=1"
 
-    out = pathlib.Path(args.out_link)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(url + "\n", encoding="utf-8")
-    print(f"[dropbox] Lien direct: {url}")
-
-if __name__ == "__main__":
-    main()
+out_link.write_text(url+"\n", encoding="utf-8")
+print(f"[dropbox] upload OK → {remote_path}\n[dropbox] link: {url}")
