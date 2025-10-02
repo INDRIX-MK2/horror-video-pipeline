@@ -68,7 +68,7 @@ ap.add_argument("--align", type=int, default=5, help="ASS Alignment (5 = centre 
 ap.add_argument("--marginv", type=int, default=200)
 
 ap.add_argument("--max-words", type=int, default=4, help="Mots max par ligne.")
-ap.add_argument("--max-lines", type=int, default=3, help="Lignes max (2-3 conseillé).")
+ap.add_argument("--max-lines", type=int, default=4, help="Lignes max (2-3 conseillé).")
 ap.add_argument("--lead", type=float, default=0.00, help="Décalage d’ancrage (s) pour anti-dérive (+avance, -retard).")
 ap.add_argument("--speed", type=float, default=1.15, help="Facteur vitesse (1.0 = proportionnel exact, >1 = plus lent).")
 
