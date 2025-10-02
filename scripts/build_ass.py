@@ -33,9 +33,9 @@ ap.add_argument("--marginv", type=int, default=200)
 ap.add_argument("--max-words", type=int, default=4, help="Mots max par ligne (histoire).")
 ap.add_argument("--max-lines", type=int, default=3, help="Lignes max par phrase (histoire).")
 
-# Anti-dérive simple
-ap.add_argument("--lead",  type=float, default=0.0, help="Décalage initial (s) appliqué à l'histoire si pas de timeline.")
-ap.add_argument("--speed", type=float, default=1.0, help="Vitesse (>1 accélère, <1 ralentit), si pas de timeline.")
+# Anti-dérive simple quand pas de timeline
+ap.add_argument("--lead",  type=float, default=0.0, help="Décalage initial (s) si pas de timeline.")
+ap.add_argument("--speed", type=float, default=1.0, help="Vitesse (>1 accélère, <1 ralentit) si pas de timeline.")
 
 args = ap.parse_args()
 
@@ -68,7 +68,7 @@ if args.timeline:
         try:
             timeline = json.loads(jp.read_text(encoding="utf-8"))
         except Exception:
-            timeline = None  # on ignore si illisible
+            timeline = None
 
 # -----------------------------
 # Utilitaires
@@ -96,15 +96,12 @@ def split_sentences(txt: str) -> list[str]:
     s = re.sub(r"\[[^\]]+\]", "", txt)
     s = re.sub(r"\([^)]+\)", "", s)
     s = re.sub(r"\s+", " ", s.strip())
-    # Coupe après . ! ? … (en gardant la ponctuation)
+    # Coupe après . ! ? …
     return [p.strip() for p in re.split(r'(?<=[\.\!\?…])\s+', s) if p.strip()]
 
 def wrap_sentence(sentence: str, max_words=4, max_lines=3) -> str:
-    """
-    Replie une phrase sur 2–3 lignes max, 4 mots max par ligne.
-    Retourne une chaîne avec séparateurs ASS '\\N' entre lignes.
-    Note: le double backslash est intentionnel pour écrire un unique \N dans le fichier .ass.
-    """
+    # Retourne une seule chaîne avec séparateurs ASS \N entre lignes.
+    # IMPORTANT: on écrit "\\N" dans Python pour produire \N dans le .ass.
     words = sentence.split()
     lines = []
     for w in words:
@@ -115,7 +112,6 @@ def wrap_sentence(sentence: str, max_words=4, max_lines=3) -> str:
                 lines.append([w])
         else:
             lines[-1].append(w)
-    # IMPORTANT: '\\N' => écrit littéralement \N dans le .ass (pas de backslash parasite)
     return "\\N".join(" ".join(line) for line in lines)
 
 # -----------------------------
@@ -144,7 +140,6 @@ def tl_seg(name: str, default_start: float, default_end: float):
 events = []  # (start, end, text)
 
 if timeline:
-    # On fait confiance au JSON (généré par ta voix) pour caler les 3 blocs
     # 1) Titre
     if title_txt:
         s, e = tl_seg("title", 0.0, min(2.0, audio_dur))
@@ -176,21 +171,19 @@ if timeline:
         events.append((s, e, txt))
 
 else:
-    # Pas de timeline => on découpe tout au fil de l'eau avec lead/speed
+    # Pas de timeline => découpage heuristique
     lead  = float(args.lead)
     speed = float(args.speed) if args.speed else 1.0
     start_t = max(0.0, lead)
     eff_dur = max(0.0, (audio_dur - start_t) / (speed if speed != 0 else 1.0))
 
-    # On réserve ~2s au titre (si fourni), ~2s au cta (si fourni), le reste pour l'histoire
     t = start_t
     if title_txt:
-        title_d = min(2.0, max(1.0, 0.03 * eff_dur))  # heuristique douce
+        title_d = min(2.0, max(1.0, 0.03 * eff_dur))
         txt = wrap_sentence(title_txt, max_words=4, max_lines=2)
         events.append((t, min(t + title_d, audio_dur), txt))
         t += title_d
 
-    # Histoire
     sentences = split_sentences(raw_story)
     if not sentences:
         sentences = [raw_story.strip()]
@@ -206,7 +199,6 @@ else:
         events.append((s, e, txt))
         t = e
 
-    # CTA
     if cta_txt and t < audio_dur:
         cta_d = min(2.0, audio_dur - t)
         if cta_d > 0.05:
@@ -252,7 +244,6 @@ hdr = (
 with opath.open("w", encoding="utf-8") as f:
     f.write(hdr)
     for s, e, txt in events:
-        # 'txt' peut contenir des "\\N" => ASS nouvellementne
         f.write(f"Dialogue: 0,{to_ass_ts(s)},{to_ass_ts(e)},TikTok,,0,0,0,,{txt}\n")
 
 print(f"[build_ass] écrit: {opath} (durée audio détectée: {audio_dur:.2f}s)")
