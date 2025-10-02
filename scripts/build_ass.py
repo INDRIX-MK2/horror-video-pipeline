@@ -35,7 +35,7 @@ ap.add_argument("--max-lines", type=int, default=3, help="Lignes max par phrase 
 
 # Anti-dérive simple quand pas de timeline
 ap.add_argument("--lead",  type=float, default=0.0, help="Décalage initial (s) si pas de timeline.")
-ap.add_argument("--speed", type=float, default=1.0, help="Vitesse (>1 accélère, <1 ralentit) si pas de timeline.")
+ap.add_argument("--speed", type=float, default=1.2, help="Vitesse (>1 accélère, <1 ralentit) si pas de timeline.")
 
 args = ap.parse_args()
 
@@ -153,7 +153,7 @@ if timeline:
         sentences = [raw_story.strip()]
     total_chars = sum(len(s) for s in sentences) or 1
     dur_story = max(0.0, story_e - story_s)
-    min_seg = 0.8
+    min_seg = 0.5
     t = story_s
     for snt in sentences:
         share = dur_story * (len(snt) / total_chars)
