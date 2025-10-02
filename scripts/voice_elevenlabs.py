@@ -6,6 +6,8 @@ Synthèse Titre + (gap) + Histoire + (gap) + CTA via ElevenLabs (Flash v2.5),
 concat en audio/voice.wav et écriture de audio/timeline.json.
 
 Dépendances: requests, ffmpeg installé dans le PATH.
+Variables env: ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+Optionnel: ELEVENLABS_MODEL_ID (défaut: eleven_flash_v2_5)
 """
 
 import os, sys, json, pathlib, argparse, subprocess, tempfile
@@ -17,7 +19,7 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 API_KEY   = os.environ.get("ELEVENLABS_API_KEY", "").strip()
 VOICE_ID  = os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
-MODEL_ID  = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5").strip()  # <= Flash v2.5 par défaut
+MODEL_ID  = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5").strip()  # Flash v2.5 par défaut
 
 def die(msg: str, code: int = 1):
     print(msg, file=sys.stderr)
@@ -47,8 +49,7 @@ def tts_to_wav(text: str, out_wav: pathlib.Path):
     }
     payload = {
         "text": text,
-        "model_id": MODEL_ID,               # <= Flash v2.5
-        # "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},  # optionnel
+        "model_id": MODEL_ID,               # Flash v2.5
         "output_format": "mp3_44100_128"    # fiable, puis conversion WAV
     }
 
@@ -57,15 +58,13 @@ def tts_to_wav(text: str, out_wav: pathlib.Path):
 
     r = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
     if r.status_code != 200:
-        mp = r.text[:500]
-        die(f"[voice] HTTP {r.status_code} ElevenLabs: {mp}")
+        die(f"[voice] HTTP {r.status_code} ElevenLabs: {r.text[:500]}")
 
     with open(mp3_path, "wb") as f:
         for chunk in r.iter_content(chunk_size=1 << 14):
             if chunk:
                 f.write(chunk)
 
-    # Convert MP3 -> WAV mono 44.1k s16
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-nostdin", "-y", "-i", str(mp3_path),
@@ -89,19 +88,24 @@ def make_silence(duration_sec: float, out_wav: pathlib.Path):
         check=True
     )
 
-def concat_wavs(paths, out_wav: pathlib.Path):
-    """Concatène via demuxer concat en utilisant un fichier-liste à chemins ABSOLUS."""
-    lst = AUDIO_DIR / "voice.txt"
+def concat_wavs(paths, out_wav: pathlib.Path, list_path: pathlib.Path | None = None):
+    """
+    Concatène via demuxer concat en utilisant un fichier-liste à chemins ABSOLUS.
+    Si list_path est fourni, il sera utilisé/écrit. Sinon, audio/voice.txt est utilisé.
+    """
+    if list_path is None:
+        list_path = AUDIO_DIR / "voice.txt"
+
     def esc(p: pathlib.Path) -> str:
-        # On évite les soucis d'espaces: on quote.
         s = str(p.resolve())
         s = s.replace("'", r"'\''")
         return f"file '{s}'"
 
-    lst.write_text("\n".join(esc(p) for p in paths) + "\n", encoding="utf-8")
+    list_path.parent.mkdir(parents=True, exist_ok=True)
+    list_path.write_text("\n".join(esc(p) for p in paths) + "\n", encoding="utf-8")
     subprocess.run(
         ["ffmpeg", "-nostdin", "-y", "-f", "concat", "-safe", "0",
-         "-i", str(lst), "-c", "copy", str(out_wav)],
+         "-i", str(list_path), "-c", "copy", str(out_wav)],
         check=True
     )
 
@@ -121,6 +125,8 @@ def main():
     ap.add_argument("--gap-cta",   type=float, default=1.0, help="Silence avant le CTA (s).")
     # sortie finale
     ap.add_argument("--out", default=str(AUDIO_DIR / "voice.wav"))
+    # (nouveau) fichier liste concat optionnel
+    ap.add_argument("--list-file", default=str(AUDIO_DIR / "voice.txt"))
     args = ap.parse_args()
 
     if args.gap is not None:
@@ -145,9 +151,10 @@ def main():
     p_gap2  = AUDIO_DIR / "gap_before_cta.wav"
     p_final = pathlib.Path(args.out)
     p_tl    = AUDIO_DIR / "timeline.json"
+    p_list  = pathlib.Path(args.list_file) if args.list_file else None
 
     # Synthèses
-    print("[voice] synthèse TITRE  ->", p_title)
+    print("[voice] synthèse TITRE   ->", p_title)
     tts_to_wav(title_txt, p_title)
 
     print("[voice] synthèse HISTOIRE ->", p_story)
@@ -157,16 +164,16 @@ def main():
     print(f"[voice] gap après titre: {args.gap_title:.3f}s")
     make_silence(args.gap_title, p_gap1)
 
-    print("[voice] synthèse CTA ->", p_cta)
+    print("[voice] synthèse CTA     ->", p_cta)
     tts_to_wav(cta_txt, p_cta)
 
-    print(f"[voice] gap avant CTA: {args.gap_cta:.3f}s")
+    print(f"[voice] gap avant CTA  : {args.gap_cta:.3f}s")
     make_silence(args.gap_cta, p_gap2)
 
     # Concat: titre, gap, histoire, gap, cta
     chain = [p_title, p_gap1, p_story, p_gap2, p_cta]
     print("[voice] concat ->", p_final)
-    concat_wavs(chain, p_final)
+    concat_wavs(chain, p_final, list_path=p_list)
 
     # Durées et timeline
     d_title = ffprobe_duration(p_title)
