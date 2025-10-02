@@ -34,7 +34,7 @@ ap.add_argument("--max-words", type=int, default=4, help="Mots max par ligne (hi
 ap.add_argument("--max-lines", type=int, default=4, help="Lignes max par phrase (histoire).")
 
 # Anti-dérive simple quand pas de timeline
-ap.add_argument("--lead",  type=float, default=0.0, help="Décalage initial (s) si pas de timeline.")
+ap.add_argument("--lead",  type=float, default=0.2, help="Décalage initial (s) si pas de timeline.")
 ap.add_argument("--speed", type=float, default=1, help="Vitesse (>1 accélère, <1 ralentit) si pas de timeline.")
 
 args = ap.parse_args()
