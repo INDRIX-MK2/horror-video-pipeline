@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
-import argparse, pathlib, sys, time, json, os
-import urllib.request, urllib.error
+import argparse, pathlib, sys, time, json, os, base64
+import urllib.request, urllib.error, urllib.parse  # <- parse importé
 
 OAUTH_TOKEN_URL = "https://api.dropbox.com/oauth2/token"
 UPLOAD_URL      = "https://content.dropboxapi.com/2/files/upload"
@@ -11,8 +11,8 @@ UPLOAD_FINISH   = "https://content.dropboxapi.com/2/files/upload_session/finish"
 LINK_CREATE     = "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings"
 LINK_LIST       = "https://api.dropboxapi.com/2/sharing/list_shared_links"
 
-CHUNK_SIZE = 15 * 1024 * 1024  # 15MB
-SMALL_LIMIT = 150 * 1024 * 1024 # 150MB
+CHUNK_SIZE  = 15 * 1024 * 1024   # 15MB
+SMALL_LIMIT = 150 * 1024 * 1024  # 150MB
 
 def http_json(url, data=None, headers=None, method="POST"):
     req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
@@ -26,13 +26,15 @@ def http_json(url, data=None, headers=None, method="POST"):
         return str(e).encode("utf-8"), 0
 
 def oauth_refresh(app_key, app_secret, refresh_token):
+    # Corps x-www-form-urlencoded
     payload = (
-        f"grant_type=refresh_token&refresh_token={urllib.parse.quote(refresh_token)}"
+        "grant_type=refresh_token&refresh_token="
+        + urllib.parse.quote(refresh_token)
     ).encode("utf-8")
-    auth = ("Basic " + (f"{app_key}:{app_secret}").encode("utf-8")).decode("latin1")
-    # Construire l’en-tête Basic correctement
-    import base64
+
+    # En-tête Basic correct (Base64 de "app_key:app_secret")
     basic = "Basic " + base64.b64encode(f"{app_key}:{app_secret}".encode("utf-8")).decode("ascii")
+
     body, code = http_json(
         OAUTH_TOKEN_URL,
         data=payload,
@@ -63,11 +65,10 @@ def upload_small(access_token, local_path: pathlib.Path, remote_path: str):
         "Content-Type": "application/octet-stream"
     }
     data = local_path.read_bytes()
-    body, code = http_json(UPLOAD_URL, data=data, headers=headers, method="POST")
-    return code, body
+    return http_json(UPLOAD_URL, data=data, headers=headers, method="POST")
 
 def upload_large(access_token, local_path: pathlib.Path, remote_path: str):
-    # 1) start
+    # start
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/octet-stream",
@@ -109,26 +110,30 @@ def upload_large(access_token, local_path: pathlib.Path, remote_path: str):
             "commit": {"path": remote_path, "mode": "add", "autorename": True, "mute": False}
         })
     }
-    body, code = http_json(UPLOAD_FINISH, data=b"", headers=headers, method="POST")
-    return code, body
+    return http_json(UPLOAD_FINISH, data=b"", headers=headers, method="POST")
 
 def ensure_shared_link(access_token, remote_path: str):
-    # Tenter création
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    payload = json.dumps({"path": remote_path}).encode("utf-8")
-    body, code = http_json(LINK_CREATE, data=payload, headers=headers, method="POST")
+    # tenter création
+    body, code = http_json(
+        LINK_CREATE,
+        data=json.dumps({"path": remote_path}).encode("utf-8"),
+        headers=headers, method="POST"
+    )
     if code == 200:
         try:
-            url = json.loads(body.decode("utf-8")).get("url","")
-            return url
+            return json.loads(body.decode("utf-8")).get("url","")
         except Exception:
             pass
-    # Sinon, lister
-    payload = json.dumps({"path": remote_path, "direct_only": True}).encode("utf-8")
-    body, code = http_json(LINK_LIST, data=payload, headers=headers, method="POST")
+    # sinon lister
+    body, code = http_json(
+        LINK_LIST,
+        data=json.dumps({"path": remote_path, "direct_only": True}).encode("utf-8"),
+        headers=headers, method="POST"
+    )
     if code == 200:
         try:
             j = json.loads(body.decode("utf-8"))
@@ -154,7 +159,6 @@ def main():
     app_key    = os.getenv("DROPBOX_APP_KEY", "")
     app_secret = os.getenv("DROPBOX_APP_SECRET", "")
     refresh    = os.getenv("DROPBOX_REFRESH_TOKEN", "")
-
     if not (app_key and app_secret and refresh):
         sys.stderr.write("[dropbox] Variables manquantes: DROPBOX_APP_KEY / DROPBOX_APP_SECRET / DROPBOX_REFRESH_TOKEN\n")
         sys.exit(1)
@@ -165,7 +169,8 @@ def main():
         sys.exit(1)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    remote_dir = args.remote_dir.rstrip("/") or ""
+    remote_dir = args.remote_dir.rstrip("/")
+    remote_dir = remote_dir if remote_dir else ""
     remote_path = f"{remote_dir}/{ts}_{local.name}" if remote_dir else f"/{ts}_{local.name}"
 
     size = local.stat().st_size
