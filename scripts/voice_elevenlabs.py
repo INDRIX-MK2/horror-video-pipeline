@@ -1,162 +1,213 @@
 #!/usr/bin/env python3
-import argparse, os, sys, json, pathlib, shlex, subprocess, tempfile
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+import argparse
+import os
+import sys
+import pathlib
+import json
+import time
+import subprocess
+import typing
+from typing import Optional
 
-"""
-Génère 0..3 segments (title/story/cta) via ElevenLabs et les concatène, avec des silences
-entre segments. Écrit la chaîne concat audio/voice.wav et la liste audio/voice.txt (chemins ABS).
-Tolérant : accepte --gap (appliqué aux deux), ou bien --gap-title et --gap-cta séparés.
-"""
+# --------- Config minimale ----------
+ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVEN_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "")
+ELEVEN_TTS_URL_TMPL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+DEFAULT_MODEL_ID = None  # ex: "eleven_multilingual_v2" si tu veux forcer un modèle
 
-def must_env(name: str) -> str:
-    v = os.environ.get(name, "").strip()
-    if not v:
-        print(f"{name} manquant", file=sys.stderr)
-        sys.exit(1)
-    return v
+def fail(msg: str, code: int = 1) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(code)
 
-def save_wav_bytes(b: bytes, out_path: pathlib.Path):
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("wb") as f:
-        f.write(b)
+def check_env() -> None:
+    if not ELEVEN_API_KEY:
+        fail("ELEVENLABS_API_KEY manquant")
+    if not ELEVEN_VOICE_ID:
+        fail("ELEVENLABS_VOICE_ID manquant")
 
-def tts_elevenlabs(text: str, voice_id: str, api_key: str) -> bytes:
-    if not text.strip():
-        return b""
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    payload = {
-        "text": text,
-        "model_id": "eleven_monolingual_v1",
-        "voice_settings": {
-            "stability": 0.45,
-            "similarity_boost": 0.75
-        }
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("xi-api-key", api_key)
-    try:
-        with urlopen(req, timeout=60) as r:
-            return r.read()
-    except HTTPError as e:
-        msg = e.read().decode("utf-8", "ignore")
-        print(f"[TTS] HTTP {e.code} -> {msg}", file=sys.stderr)
-        sys.exit(1)
-    except URLError as e:
-        print(f"[TTS] URL error -> {e}", file=sys.stderr)
-        sys.exit(1)
-
-def make_silence(seconds: float, out_path: pathlib.Path):
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    # WAV PCM 16 mono 48k
-    cmd = [
-        "ffmpeg","-nostdin","-y",
-        "-f","lavfi","-i",f"anullsrc=r=48000:cl=mono",
-        "-t",str(max(0.0, seconds)),
-        "-c:a","pcm_s16le",
-        str(out_path)
-    ]
-    subprocess.run(cmd, check=True)
-
-def concat_wavs(abs_paths, out_path: pathlib.Path, list_file: pathlib.Path):
-    list_file.parent.mkdir(parents=True, exist_ok=True)
-    with list_file.open("w", encoding="utf-8") as f:
-        for p in abs_paths:
-            f.write(f"file {shlex.quote(str(p))}\n")
-    cmd = [
-        "ffmpeg","-nostdin","-y",
-        "-f","concat","-safe","0",
-        "-i",str(list_file),
-        "-c","copy",
-        str(out_path)
-    ]
-    subprocess.run(cmd, check=True)
-
-def read_txt(p: pathlib.Path) -> str:
+def read_text_file(p: pathlib.Path) -> str:
     if not p.exists() or not p.stat().st_size:
-        return ""
+        fail(f"Fichier texte manquant/vide: {p}")
     return p.read_text(encoding="utf-8").strip()
 
+def tts_to_wav(text: str, out_path: pathlib.Path, voice_id: Optional[str] = None, model_id: Optional[str] = None) -> None:
+    """
+    Appelle l'API ElevenLabs et enregistre un WAV (PCM) dans out_path.
+    """
+    import urllib.request
+    import urllib.error
+
+    voice = voice_id or ELEVEN_VOICE_ID
+    url = ELEVEN_TTS_URL_TMPL.format(voice_id=voice)
+
+    payload = {
+        "text": text,
+        # "voice_settings": {"stability": 0.4, "similarity_boost": 0.8},  # optionnel
+    }
+    if model_id:
+        payload["model_id"] = model_id
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("xi-api-key", ELEVEN_API_KEY)
+    req.add_header("accept", "audio/mpeg")  # on reçoit du mp3
+    req.add_header("content-type", "application/json")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    mp3_tmp = out_path.with_suffix(".mp3")
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(mp3_tmp, "wb") as f:
+            f.write(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        fail(f"HTTP {e.code} ElevenLabs: {body}")
+    except Exception as e:
+        fail(f"Erreur TTS ElevenLabs: {e}")
+
+    # Convertir mp3 -> wav (48k stéréo)
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-i", str(mp3_tmp),
+        "-ar", "48000",
+        "-ac", "2",
+        str(out_path)
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        fail(f"ffmpeg conversion mp3->wav a échoué: {e}")
+    finally:
+        try:
+            mp3_tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def make_silence(seconds: float, out_path: pathlib.Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
+        "-t", str(seconds),
+        str(out_path)
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def concat_wavs_chain(files: typing.List[pathlib.Path], out_path: pathlib.Path) -> None:
+    """
+    Concatène plusieurs wav "codec copy".
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    lst = out_path.parent / "voice_concat.txt"
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in files:
+            f.write(f"file '{p.as_posix()}'\n")
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(lst),
+        "-c", "copy",
+        str(out_path)
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
 def main():
-    ap = argparse.ArgumentParser(description="ElevenLabs TTS chain (title -> gap -> story -> gap -> cta)")
-    ap.add_argument("--title-file", type=str, help="fichier texte du titre")
-    ap.add_argument("--story-file", type=str, help="fichier texte de l'histoire")
-    ap.add_argument("--cta-file",   type=str, help="fichier texte du CTA")
+    check_env()
 
-    # gaps
-    ap.add_argument("--gap", type=float, default=None, help="appliquer le même gap (s) avant histoire et avant cta")
-    ap.add_argument("--gap-title", type=float, default=1.0, help="silence après le titre (s)")
-    ap.add_argument("--gap-cta",   type=float, default=1.0, help="silence avant le CTA (s)")
+    ap = argparse.ArgumentParser(
+        description="ElevenLabs TTS helper (compat: --transcript/--out) + (title/story/cta mode)"
+    )
+    # --- Mode A (ancien) ---
+    ap.add_argument("--transcript", help="Fichier texte à lire (mode ancien)")
+    ap.add_argument("--out", help="WAV de sortie (mode ancien ou mode B concat)", default=None)
 
-    # sorties
-    ap.add_argument("--out", type=str, default="audio/voice.wav")
-    ap.add_argument("--list-file", type=str, default="audio/voice.txt")
-
+    # --- Mode B (nouveau, optionnel) ---
+    ap.add_argument("--title-file", help="Texte du titre", default=None)
+    ap.add_argument("--story-file", help="Texte de l'histoire", default=None)
+    ap.add_argument("--cta-file", help="Texte CTA", default=None)
+    ap.add_argument("--gap", type=float, default=1.0, help="Silence (s) générique entre segments si gap-title/gap-cta non précisés")
+    ap.add_argument("--gap-title", type=float, default=None, help="Silence (s) après le titre (par défaut: --gap)")
+    ap.add_argument("--gap-cta", type=float, default=None, help="Silence (s) après l'histoire avant CTA (par défaut: --gap)")
+    ap.add_argument("--list-file", default=None, help="Écrit aussi la liste concat (optionnel)")
+    ap.add_argument("--voice-id", default=None, help="Override ELEVENLABS_VOICE_ID")
+    ap.add_argument("--model-id", default=None, help="Override model_id")
     args = ap.parse_args()
 
-    # Tolérance : si --gap est fourni, l’appliquer aux deux s’il ne sont pas spécifiés
-    if args.gap is not None:
-        if ap.get_default("gap_title") == args.gap_title:
-            args.gap_title = args.gap
-        if ap.get_default("gap_cta") == args.gap_cta:
-            args.gap_cta = args.gap
+    voice_id = args.voice_id or ELEVEN_VOICE_ID
+    model_id = args.model_id or DEFAULT_MODEL_ID
 
-    # Envs
-    api_key = must_env("ELEVENLABS_API_KEY")
-    voice_id = must_env("ELEVENLABS_VOICE_ID")
+    # Détection du mode
+    mode_old = bool(args.transcript and args.out and not (args.title_file or args.story_file or args.cta_file))
+    mode_new = bool(args.out and (args.title_file or args.story_file or args.cta_file))
 
-    # Entrées
-    title_txt = read_txt(pathlib.Path(args.title_file)) if args.title_file else ""
-    story_txt = read_txt(pathlib.Path(args.story_file)) if args.story_file else ""
-    cta_txt   = read_txt(pathlib.Path(args.cta_file))   if args.cta_file   else ""
+    if not mode_old and not mode_new:
+        ap.print_help()
+        fail("Utilisation invalide: fournis soit --transcript et --out (mode ancien), soit --out avec au moins un de --title-file/--story-file/--cta-file (mode nouveau).", 2)
 
-    out_path  = pathlib.Path(args.out)
+    if mode_old:
+        # ------- MODE A : rétro-compat (ancien) -------
+        tpath = pathlib.Path(args.transcript)
+        out_path = pathlib.Path(args.out)
+        text = read_text_file(tpath)
+        tts_to_wav(text, out_path, voice_id=voice_id, model_id=model_id)
+        if not out_path.exists() or not out_path.stat().st_size:
+            fail(f"Echec génération WAV: {out_path}")
+        print(f"[voice] OK -> {out_path}")
+        return
+
+    # ------- MODE B : nouveau (optionnel) -------
+    out_path = pathlib.Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    list_file = pathlib.Path(args.list_file)
 
-    tmp = pathlib.Path("audio")
-    tmp.mkdir(parents=True, exist_ok=True)
+    title_text = read_text_file(pathlib.Path(args.title_file)) if args.title_file else None
+    story_text = read_text_file(pathlib.Path(args.story_file)) if args.story_file else None
+    cta_text = read_text_file(pathlib.Path(args.cta_file)) if args.cta_file else None
 
-    chain = []  # chemins ABS dans l’ordre
-    # 1) Title
-    if title_txt:
-        b = tts_elevenlabs(title_txt, voice_id, api_key)
-        title_wav = tmp / "title.wav"
-        save_wav_bytes(b, title_wav)
-        chain.append(title_wav.resolve())
-        # gap après le titre
-        if args.gap_title > 0:
-            g1 = tmp / "gap_after_title.wav"
-            make_silence(args.gap_title, g1)
-            chain.append(g1.resolve())
+    # Fichiers intermédiaires
+    audio_dir = out_path.parent
+    title_wav = audio_dir / "title.wav"
+    story_wav = audio_dir / "story.wav"
+    cta_wav   = audio_dir / "cta.wav"
 
-    # 2) Story
-    if story_txt:
-        b = tts_elevenlabs(story_txt, voice_id, api_key)
-        story_wav = tmp / "story.wav"
-        save_wav_bytes(b, story_wav)
-        chain.append(story_wav.resolve())
-        # gap avant CTA
-        if cta_txt and args.gap_cta > 0:
-            g2 = tmp / "gap_before_cta.wav"
-            make_silence(args.gap_cta, g2)
-            chain.append(g2.resolve())
+    chain: typing.List[pathlib.Path] = []
 
-    # 3) CTA
-    if cta_txt:
-        b = tts_elevenlabs(cta_txt, voice_id, api_key)
-        cta_wav = tmp / "cta.wav"
-        save_wav_bytes(b, cta_wav)
-        chain.append(cta_wav.resolve())
+    if title_text:
+        tts_to_wav(title_text, title_wav, voice_id=voice_id, model_id=model_id)
+        chain.append(title_wav)
+        gap_title = args.gap_title if args.gap_title is not None else args.gap
+        if gap_title and gap_title > 0:
+            sil1 = audio_dir / "silence_after_title.wav"
+            make_silence(gap_title, sil1)
+            chain.append(sil1)
+
+    if story_text:
+        tts_to_wav(story_text, story_wav, voice_id=voice_id, model_id=model_id)
+        chain.append(story_wav)
+        gap_cta = args.gap_cta if args.gap_cta is not None else args.gap
+        if cta_text and gap_cta and gap_cta > 0:
+            sil2 = audio_dir / "silence_before_cta.wav"
+            make_silence(gap_cta, sil2)
+            chain.append(sil2)
+
+    if cta_text:
+        tts_to_wav(cta_text, cta_wav, voice_id=voice_id, model_id=model_id)
+        chain.append(cta_wav)
 
     if not chain:
-        print("Aucun segment audio généré (title/story/cta vides ?)", file=sys.stderr)
-        sys.exit(1)
+        fail("Aucun segment (title/story/cta) fourni")
 
-    concat_wavs(chain, out_path, list_file)
-    print(f"[voice] OK -> {out_path} | list: {list_file}")
+    if args.list_file:
+        lst = pathlib.Path(args.list_file)
+        lst.parent.mkdir(parents=True, exist_ok=True)
+        with open(lst, "w", encoding="utf-8") as f:
+            for p in chain:
+                f.write(f"file '{p.as_posix()}'\n")
+
+    # Concat finale
+    concat_wavs_chain(chain, out_path)
+    if not out_path.exists() or not out_path.stat().st_size:
+        fail(f"Echec concat WAV final: {out_path}")
+    print(f"[voice] Chaîne TTS OK -> {out_path}")
 
 if __name__ == "__main__":
     main()
