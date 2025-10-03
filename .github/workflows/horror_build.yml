@@ -113,8 +113,8 @@ jobs:
             --marginv 200 \
             --max-words 3 \
             --max-lines 4 \
-            --lead 0.4 \
-            --speed 1.4
+            --lead 0.6 \
+            --speed 2
           [ -s subs/captions.ass ] || { echo "captions.ass manquant"; exit 1; }
 
 
