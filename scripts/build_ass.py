@@ -30,12 +30,12 @@ ap.add_argument("--align",   type=int, default=5)  # 5 = centre milieu
 ap.add_argument("--marginv", type=int, default=200)
 
 # Contrôle du rendu des lignes de l'histoire
-ap.add_argument("--max-words", type=int, default=4, help="Mots max par ligne (histoire).")
+ap.add_argument("--max-words", type=int, default=3, help="Mots max par ligne (histoire).")
 ap.add_argument("--max-lines", type=int, default=4, help="Lignes max par phrase (histoire).")
 
 # Anti-dérive simple quand pas de timeline
-ap.add_argument("--lead",  type=float, default=0.3, help="Décalage initial (s) si pas de timeline.")
-ap.add_argument("--speed", type=float, default=1.3, help="Vitesse (>1 accélère, <1 ralentit) si pas de timeline.")
+ap.add_argument("--lead",  type=float, default=0.4, help="Décalage initial (s) si pas de timeline.")
+ap.add_argument("--speed", type=float, default=1.4, help="Vitesse (>1 accélère, <1 ralentit) si pas de timeline.")
 
 args = ap.parse_args()
 
