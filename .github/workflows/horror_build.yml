@@ -91,33 +91,6 @@ jobs:
             --out selected_media/merged.mp4
           [ -s selected_media/merged.mp4 ] || { echo "merged.mp4 manquant"; exit 1; }
 
-      # 4) Sous-titres (ASS) centrés/jaunes (story uniquement – si tu utilises la version “story-only”)
-      - name: Build ASS subtitles (title + story + cta + timeline)
-        run: |
-          set -euo pipefail
-          python scripts/build_ass.py \
-            --transcript story/story.txt \
-            --title-file story/title.txt \
-            --cta-file   story/cta.txt \
-            --timeline   audio/timeline.json \
-            --audio      audio/voice.wav \
-            --out        subs/captions.ass \
-            --font "Arial" \
-            --size 80 \
-            --colour "&H00FFFF00" \
-            --outline-colour "&H00000000" \
-            --back-colour "&H64000000" \
-            --outline 3 \
-            --shadow 2 \
-            --align 5 \
-            --marginv 200 \
-            --max-words 3 \
-            --max-lines 5 \
-            --lead 0\
-            --speed 1
-          [ -s subs/captions.ass ] || { echo "captions.ass manquant"; exit 1; }
-
-
       # 5) Render final (fondu noir + subs + audio)
       - name: Render final video
         shell: bash
