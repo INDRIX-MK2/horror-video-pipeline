@@ -99,7 +99,6 @@ jobs:
           python scripts/render_final.py \
             --video selected_media/merged.mp4 \
             --audio audio/voice.wav \
-            --subs  subs/captions.ass \
             --output final_video/${OUT_NAME}
           [ -s "final_video/${OUT_NAME}" ] || { echo "final video manquante"; exit 1; }
 
