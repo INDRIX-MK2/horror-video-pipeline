@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, sys, json, pathlib, subprocess, tempfile, requests, shlex
+import os, sys, json, pathlib, subprocess, requests, shlex
 
 # -----------------------
 # Helpers
 # -----------------------
 def ensure_dir(p: pathlib.Path):
-    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.suffix:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        p.mkdir(parents=True, exist_ok=True)
 
 def ffprobe_duration(path: pathlib.Path) -> float:
     try:
@@ -20,7 +23,6 @@ def ffprobe_duration(path: pathlib.Path) -> float:
 
 def to_wav(src_path: pathlib.Path, dst_path: pathlib.Path):
     ensure_dir(dst_path)
-    # Normalise en WAV PCM 44.1k mono (concat demuxer friendly)
     subprocess.run([
         "ffmpeg","-nostdin","-y","-i",str(src_path),
         "-ar","44100","-ac","1","-c:a","pcm_s16le", str(dst_path)
@@ -62,15 +64,25 @@ def eleven_tts(text: str, mp3_out: pathlib.Path, api_key: str, voice_id: str, mo
     mp3_out.write_bytes(r.content)
     return True
 
-def concat_wavs(order, out_path: pathlib.Path):
-    ensure_dir(out_path)
-    lst = out_path.parent / "voice.txt"
-    with lst.open("w", encoding="utf-8") as f:
-        for p in order:
+def write_concat_list(order_paths, list_path: pathlib.Path):
+    ensure_dir(list_path)
+    with list_path.open("w", encoding="utf-8") as f:
+        for p in order_paths:
+            # format attendu par le demuxer concat
             f.write(f"file {shlex.quote(str(p))}\n")
-    # Tous les WAV sont PCM 44.1k mono → on peut -c copy
+
+def concat_wavs(order, out_path: pathlib.Path, list_path: pathlib.Path|None):
+    ensure_dir(out_path)
+    # fichier de liste interne (même dossier que out) pour concat
+    internal_list = out_path.with_name("voice.txt")
+    write_concat_list(order, internal_list)
+    if list_path:
+        # si demandé, écrire aussi la même liste à l’endroit souhaité par le workflow
+        write_concat_list(order, list_path)
+
     subprocess.run([
-        "ffmpeg","-nostdin","-y","-f","concat","-safe","0","-i",str(lst),
+        "ffmpeg","-nostdin","-y","-f","concat","-safe","0",
+        "-i",str(internal_list),
         "-c","copy",str(out_path)
     ], check=True)
 
@@ -83,17 +95,17 @@ ap.add_argument("--title-file", default="story/title.txt")
 ap.add_argument("--story-file", default="story/story.txt")
 ap.add_argument("--cta-file",   default="story/cta.txt")
 
-ap.add_argument("--gap",        type=float, default=None, help="gap (s) after title and before CTA (overridden by specific gaps)")
+ap.add_argument("--gap",        type=float, default=None, help="gap (s) after title and before CTA (overrides specific gaps)")
 ap.add_argument("--gap-title",  type=float, default=1.0,  help="gap (s) after title")
 ap.add_argument("--gap-cta",    type=float, default=1.0,  help="gap (s) before CTA")
 
 ap.add_argument("--out",        default="audio/voice.wav")
+ap.add_argument("--list-file",  default=None, help="(optionnel) Chemin où écrire la liste des segments WAV concaténés")
+
 args = ap.parse_args()
 
-# Harmonise gaps
+# Harmonise gaps si --gap fourni
 if args.gap is not None:
-    if ap.parse_known_args:  # just to silence linters; not actually used
-        pass
     args.gap_title = args.gap
     args.gap_cta   = args.gap
 
@@ -105,6 +117,8 @@ t_cta   = root / args.cta_file
 out_wav = root / args.out
 audio_dir = out_wav.parent
 ensure_dir(out_wav)
+
+external_list = (root / args.list_file) if args.list_file else None
 
 title_mp3 = audio_dir / "title.mp3"
 story_mp3 = audio_dir / "story.mp3"
@@ -196,8 +210,8 @@ if cta_ok:
     segments["cta"] = (t, t+d)
     t += d
 
-# Concat
-concat_wavs(order, out_wav)
+# Concat + (optionnel) fichier liste externe
+concat_wavs(order, out_wav, external_list)
 total = ffprobe_duration(out_wav)
 
 # -----------------------
@@ -213,9 +227,12 @@ if "cta" in segments:
 tl["gaps"]  = {"title_after": round(gap_title,3), "cta_before": round(gap_cta,3)}
 tl["total"] = round(total,3)
 
+ensure_dir(timeline)
 timeline.write_text(json.dumps(tl, ensure_ascii=False, indent=2), encoding="utf-8")
 
 print(f"[voice] OK -> {out_wav} (total ~{total:.2f}s)")
 print(f"[voice] timeline -> {timeline}")
 for k in ("title","story","cta"):
     if k in tl: print(f"[voice] {k}: {tl[k]['start']}→{tl[k]['end']}")
+if external_list:
+    print(f"[voice] list-file -> {external_list}")
