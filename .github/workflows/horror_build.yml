@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           python scripts/generate_story.py \
             --system "Tu écris un script court et immersif d'horreur en français. Pas de didascalies (intro, scène, narrateur, CTA...). Raconte uniquement l'histoire." \
-            --user "Écris un script TikTok de 180 à 200 mots (65-75s). Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés." \
+            --user "Écris un script TikTok de 80 à 100 mots. Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés." \
             --title-out story/title.txt \
             --story-out story/story.txt \
             --cta-out   story/cta.txt
@@ -140,6 +140,20 @@ jobs:
             --remote-dir "/horror" \
             --out-link "final_video/dropbox_link.txt"
           [ -s final_video/dropbox_link.txt ] || { echo "Lien Dropbox manquant"; exit 1; }
+
+      - name: Publish to TikTok (caption via OpenAI)
+        run: |
+          python scripts/tiktok_publish.py
+          [ -s final_video/caption.txt ] && echo "Caption OK: $(head -n1 final_video/caption.txt)"
+          [ -s final_video/tiktok_response.json ] && echo "TikTok response enregistré."
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # EITHER direct access token:
+          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+          # OR refresh flow (si tu préfères) :
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
 
       - name: Upload artifact (final video + link)
         uses: actions/upload-artifact@v4
