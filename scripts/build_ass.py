@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import sys, argparse, pathlib, json, re, subprocess
 
-# ---------------- Utils ----------------
+# ---------- Utils ----------
 def ffprobe_duration(path: pathlib.Path) -> float:
     try:
         out = subprocess.check_output([
@@ -37,14 +37,16 @@ def split_sentences(text: str):
     return [p.strip() for p in parts if p.strip()]
 
 def wrap_words(words, max_words=4, max_lines=3):
-    """Retourne jusqu'à max_lines, avec max_words par ligne (sauts de ligne durs)."""
+    """
+    Retourne jusqu'à max_lines, avec max_words par ligne.
+    On renvoie des lignes destinées à être jointes par '\\N' (sauts durs ASS).
+    """
     lines, buf = [], []
     for w in words:
         buf.append(w)
         if len(buf) >= max_words:
             lines.append(" ".join(buf)); buf=[]
         if len(lines) >= max_lines:
-            # S'il reste des mots, on les colle sur la dernière ligne (pour ne pas faire un event de plus)
             if buf:
                 lines[-1] = (lines[-1] + " " + " ".join(buf)).strip()
                 buf = []
@@ -66,7 +68,7 @@ def normalize_blocks(durations, total_window):
         out[-1] += delta
     return out
 
-# ---------------- Args ----------------
+# ---------- Args ----------
 ap = argparse.ArgumentParser(description="Build ASS subtitles (Title/Story/CTA) aligned to voice.")
 ap.add_argument("--transcript", required=True, help="story/story.txt")
 ap.add_argument("--audio",      required=True, help="audio/voice.wav (fallback duration)")
@@ -74,7 +76,7 @@ ap.add_argument("--out",        default="subs/captions.ass")
 
 ap.add_argument("--title-file", default="story/title.txt")
 ap.add_argument("--cta-file",   default="story/cta.txt")
-ap.add_argument("--timeline",   default="audio/timeline.json")  # produced by voice_elevenlabs.py
+ap.add_argument("--timeline",   default="audio/timeline.json")  # produit par voice_elevenlabs.py
 
 # Style
 ap.add_argument("--font",   default="Arial")
@@ -87,18 +89,19 @@ ap.add_argument("--shadow",  type=int, default=2)
 ap.add_argument("--align",   type=int, default=5)          # centre
 ap.add_argument("--marginv", type=int, default=200)
 
-# Tempo/découpage
+# Tempo / découpage
 ap.add_argument("--max-words", type=int, default=4)
 ap.add_argument("--max-lines", type=int, default=3)
-ap.add_argument("--lead",  type=float, default=0.25, help="retire n secondes à la fin de chaque event")
+ap.add_argument("--lead",  type=float, default=0.20, help="retire n secondes à la fin de chaque event")
 ap.add_argument("--speed", type=float, default=1.20, help=">1.0 = affiche moins longtemps (plus 'speed')")
 
 # Clamps
 ap.add_argument("--min-sent", type=float, default=0.80, help="durée min. par phrase")
-ap.add_argument("--min-line", type=float, default=0.35, help="durée min. par ligne")
+ap.add_argument("--min-line", type=float, default=0.35, help="durée min. si on divisait (sécurité)")
+
 args = ap.parse_args()
 
-# ---------------- Inputs ----------------
+# ---------- Inputs ----------
 t_story = pathlib.Path(args.transcript)
 t_title = pathlib.Path(args.title_file)
 t_cta   = pathlib.Path(args.cta_file)
@@ -117,7 +120,7 @@ cta_txt   = t_cta.read_text(encoding="utf-8", errors="ignore") if t_cta.exists()
 
 audio_dur = ffprobe_duration(audio)
 
-# ---------------- Timeline ----------------
+# ---------- Timeline ----------
 tl = None
 tline = pathlib.Path(args.timeline)
 if tline.exists() and tline.stat().st_size:
@@ -134,8 +137,7 @@ def seg_of(name, fallback_start, fallback_end):
             return float(st), float(en)
     return fallback_start, fallback_end
 
-# Si timeline absente, on place le titre au tout début (0.00),
-# puis l'histoire, puis le CTA sur la fin.
+# Sans timeline: titre dès 0.00, histoire ensuite, CTA à la fin
 if not tl:
     title_len = 2.0 if title_txt.strip() else 0.0
     cta_len   = 2.0 if cta_txt.strip()   else 0.0
@@ -147,7 +149,11 @@ else:
     story_seg = seg_of("story", 0.00, audio_dur)
     cta_seg   = seg_of("cta",   0.00, 0.00)
 
-# ---------------- Build ASS ----------------
+# Petitse sécurité: si le titre commence très près de 0, on le cloue à 0.00
+if title_seg[0] < 0.25:
+    title_seg = (0.00, title_seg[1])
+
+# ---------- Header ASS ----------
 hdr = (
     "[Script Info]\n"
     "ScriptType: v4.00+\n"
@@ -169,27 +175,24 @@ hdr = (
 events = []
 
 def push_event(start, end, text_lines):
-    # lead : on enlève un petit delta en fin d’event pour “respirer”
-    e = max(start, min(end - args.lead, end))
-    if e <= start:
-        e = min(end, start + 0.15)
-    # IMPORTANT : sauts de ligne durs \\N (et pas un backslash final)
+    end_eff = max(start, min(end - args.lead, end))
+    if end_eff <= start:
+        end_eff = min(end, start + 0.15)
+    # IMPORTANT: forcer les sauts de ligne simultanés
     txt = "\\N".join([ln.strip() for ln in text_lines if ln.strip()])
     if not txt:
         return
-    events.append(f"Dialogue: 0,{ass_ts(start)},{ass_ts(e)},TikTok,,0,0,0,,{txt}")
+    events.append(f"Dialogue: 0,{ass_ts(start)},{ass_ts(end_eff)},TikTok,,0,0,0,,{txt}")
 
-# ---- 1) Title
+# ---------- 1) Title (multi-lignes d'un coup) ----------
 if title_txt.strip() and title_seg[1] > title_seg[0]:
-    # force affichage au tout début si on est très proche de 0 (cas sans timeline)
-    st = 0.00 if not tl else title_seg[0]
-    en = title_seg[1]
+    st, en = title_seg
+    dur = max(0.8, (en - st) / max(args.speed, 0.01))
     words = clean_text(title_txt).split()
     lines = wrap_words(words, max_words=args.max_words, max_lines=args.max_lines)
-    dur  = max(0.8, (en - st) / max(args.speed, 0.01))
     push_event(st, st + dur, lines)
 
-# ---- 2) Story (par phrases, puis chaque phrase est wrapée sur 2-3 lignes)
+# ---------- 2) Story : phrase par phrase, chaque phrase en multi-lignes ----------
 story_sentences = split_sentences(story_txt)
 if story_sentences and story_seg[1] > story_seg[0]:
     W = [len(clean_text(s).split()) for s in story_sentences]
@@ -203,28 +206,19 @@ if story_sentences and story_seg[1] > story_seg[0]:
     for s, d in zip(story_sentences, dur_sent):
         words = clean_text(s).split()
         lines = wrap_words(words, max_words=args.max_words, max_lines=args.max_lines)
-
-        # répartir la durée d’une phrase entre ses lignes au prorata des mots
-        lw = [len(ln.split()) for ln in lines]
-        lw_total = sum(lw) if sum(lw) > 0 else len(lines)
-        raw_lines = [max(args.min_line, (w / lw_total) * d) for w in lw]
-        dur_lines = normalize_blocks(raw_lines, d)
-
-        start = t_cursor
-        for ln, dl in zip(lines, dur_lines):
-            push_event(start, start + dl, [ln])
-            start += dl
+        # >>> CORRIGÉ : une seule event multi-lignes pour la phrase
+        push_event(t_cursor, t_cursor + d, lines)
         t_cursor += d
 
-# ---- 3) CTA
+# ---------- 3) CTA (multi-lignes d'un coup) ----------
 if cta_txt.strip() and cta_seg[1] > cta_seg[0]:
-    words = clean_text(cta_txt).split()
-    lines = wrap_words(words, max_words=args.max_words, max_lines=args.max_lines)
     st, en = cta_seg
     dur = max(0.8, (en - st) / max(args.speed, 0.01))
+    words = clean_text(cta_txt).split()
+    lines = wrap_words(words, max_words=args.max_words, max_lines=args.max_lines)
     push_event(st, st + dur, lines)
 
-# Écriture
+# ---------- Écriture ----------
 with open(ass_out, "w", encoding="utf-8") as f:
     f.write(hdr)
     for ev in events:
