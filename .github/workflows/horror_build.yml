@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           python scripts/generate_story.py \
             --system "Tu écris un script court et immersif d'horreur en français. Pas de didascalies (intro, scène, narrateur, CTA...). Raconte uniquement l'histoire." \
-            --user "Écris un script TikTok de 180 à 200 mots. Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique, manoir, pluie, bruits métalliques. Style concis, phrases courtes, sans grossièretés." \
+            --user "Écris un script TikTok de 180 à 200 mots. Structure : hook (10s), développement (45s), conclusion avec CTA (10s). Thème : horreur atmosphérique. Style concis, sans grossièretés." \
             --title-out story/title.txt \
             --story-out story/story.txt \
             --cta-out   story/cta.txt
