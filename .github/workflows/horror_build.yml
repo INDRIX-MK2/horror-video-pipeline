@@ -141,20 +141,6 @@ jobs:
             --out-link "final_video/dropbox_link.txt"
           [ -s final_video/dropbox_link.txt ] || { echo "Lien Dropbox manquant"; exit 1; }
 
-      - name: Publish to TikTok (caption via OpenAI)
-        run: |
-          python scripts/tiktok_publish.py
-          [ -s final_video/caption.txt ] && echo "Caption OK: $(head -n1 final_video/caption.txt)"
-          [ -s final_video/tiktok_response.json ] && echo "TikTok response enregistré."
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # EITHER direct access token:
-          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
-          # OR refresh flow (si tu préfères) :
-          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
-          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
-          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
-
       - name: Upload artifact (final video + link)
         uses: actions/upload-artifact@v4
         with:
