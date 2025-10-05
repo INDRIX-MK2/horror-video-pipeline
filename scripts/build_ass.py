@@ -90,10 +90,10 @@ ap.add_argument("--align",   type=int, default=5)          # centre
 ap.add_argument("--marginv", type=int, default=200)
 
 # Tempo / découpage
-ap.add_argument("--max-words", type=int, default=4)
-ap.add_argument("--max-lines", type=int, default=3)
-ap.add_argument("--lead",  type=float, default=0.20, help="retire n secondes à la fin de chaque event")
-ap.add_argument("--speed", type=float, default=1.20, help=">1.0 = affiche moins longtemps (plus 'speed')")
+ap.add_argument("--max-words", type=int, default=3)
+ap.add_argument("--max-lines", type=int, default=5)
+ap.add_argument("--lead",  type=float, default=0.1, help="retire n secondes à la fin de chaque event")
+ap.add_argument("--speed", type=float, default=1.1, help=">1.0 = affiche moins longtemps (plus 'speed')")
 
 # Clamps
 ap.add_argument("--min-sent", type=float, default=0.80, help="durée min. par phrase")
